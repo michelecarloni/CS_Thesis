@@ -11,6 +11,7 @@ import os
 from sklearn.metrics import classification_report, confusion_matrix
 import seaborn as sns
 import matplotlib.pyplot as plt
+from sklearn.utils.class_weight import compute_class_weight
 
 # 1) Experiment Configuration
 # Toggle this to True or False to experiment!
@@ -100,6 +101,26 @@ X_train_t = torch.tensor(X_train_processed, dtype=torch.float32).to(device)
 y_train_t = torch.tensor(y_train, dtype=torch.long).to(device)
 X_test_t = torch.tensor(X_test_processed, dtype=torch.float32).to(device)
 y_test_t = torch.tensor(y_test, dtype=torch.long).to(device)
+
+# 1. Calculate the optimal weights using Scikit-Learn
+# We use 'balanced' to automatically weight them inversely proportional to their frequencies
+class_weights_np = compute_class_weight(
+    class_weight='balanced',
+    classes=np.unique(y_train), # The unique classes (0, 1, 2)
+    y=y_train                   # The training labels it uses to count the frequencies
+)
+
+print(f"Calculated Class Weights: {class_weights_np}")
+# Expected output will look something like: [1.3, 0.5, 2.0]
+# Notice how the rare classes get big multipliers, and the common class gets a fraction.
+
+# 2. Convert to a PyTorch Tensor and SHIP IT TO YOUR RTX 4060
+# (If you forget to send it to the 'device', PyTorch will crash during the forward pass!)
+weights_tensor = torch.tensor(class_weights_np, dtype=torch.float32).to(device)
+
+# 3. Inject the weights into the Loss Function
+# Now, PyTorch will automatically multiply the error by these penalties!
+criterion = nn.CrossEntropyLoss(weight=weights_tensor)
 
 # 6) Define the Neural Network
 class SimpleClassifier(nn.Module):
