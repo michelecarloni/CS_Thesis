@@ -1,0 +1,64 @@
+EXPERIMENT SCENARIO: 3_Corn_Tillage_Only
+Total Samples: 2495
+==================================================
+
+--- DECISION TREE ---
+Overall Accuracy: 82.11%
+Classification Report:
+              precision    recall  f1-score   support
+
+           2       0.91      0.83      0.87       441
+           3       0.77      0.86      0.81       245
+           4       0.53      0.60      0.56        63
+
+    accuracy                           0.82       749
+   macro avg       0.74      0.76      0.75       749
+weighted avg       0.83      0.82      0.82       749
+
+--------------------------------------------------
+
+--- RANDOM FOREST ---
+Overall Accuracy: 92.39%
+Classification Report:
+              precision    recall  f1-score   support
+
+           2       0.93      0.96      0.95       441
+           3       0.92      0.90      0.91       245
+           4       0.84      0.75      0.79        63
+
+    accuracy                           0.92       749
+   macro avg       0.90      0.87      0.88       749
+weighted avg       0.92      0.92      0.92       749
+
+--------------------------------------------------
+
+--- LOGISTIC REGRESSION ---
+Overall Accuracy: 88.79%
+Classification Report:
+              precision    recall  f1-score   support
+
+           2       0.93      0.92      0.92       441
+           3       0.86      0.87      0.86       245
+           4       0.73      0.76      0.74        63
+
+    accuracy                           0.89       749
+   macro avg       0.84      0.85      0.84       749
+weighted avg       0.89      0.89      0.89       749
+
+--------------------------------------------------
+
+--- LINEAR SVM ---
+Overall Accuracy: 89.32%
+Classification Report:
+              precision    recall  f1-score   support
+
+           2       0.94      0.92      0.93       441
+           3       0.85      0.88      0.87       245
+           4       0.74      0.78      0.76        63
+
+    accuracy                           0.89       749
+   macro avg       0.85      0.86      0.85       749
+weighted avg       0.89      0.89      0.89       749
+
+--------------------------------------------------
+

@@ -1,0 +1,64 @@
+EXPERIMENT SCENARIO: 4_Soybean_Tillage_Only
+Total Samples: 4020
+==================================================
+
+--- DECISION TREE ---
+Overall Accuracy: 82.59%
+Classification Report:
+              precision    recall  f1-score   support
+
+          10       0.77      0.76      0.76       293
+          11       0.88      0.89      0.88       727
+          12       0.71      0.69      0.70       186
+
+    accuracy                           0.83      1206
+   macro avg       0.79      0.78      0.78      1206
+weighted avg       0.82      0.83      0.83      1206
+
+--------------------------------------------------
+
+--- RANDOM FOREST ---
+Overall Accuracy: 91.87%
+Classification Report:
+              precision    recall  f1-score   support
+
+          10       0.93      0.86      0.89       293
+          11       0.92      0.96      0.94       727
+          12       0.90      0.84      0.87       186
+
+    accuracy                           0.92      1206
+   macro avg       0.92      0.89      0.90      1206
+weighted avg       0.92      0.92      0.92      1206
+
+--------------------------------------------------
+
+--- LOGISTIC REGRESSION ---
+Overall Accuracy: 88.31%
+Classification Report:
+              precision    recall  f1-score   support
+
+          10       0.82      0.84      0.83       293
+          11       0.91      0.91      0.91       727
+          12       0.89      0.87      0.88       186
+
+    accuracy                           0.88      1206
+   macro avg       0.87      0.87      0.87      1206
+weighted avg       0.88      0.88      0.88      1206
+
+--------------------------------------------------
+
+--- LINEAR SVM ---
+Overall Accuracy: 88.23%
+Classification Report:
+              precision    recall  f1-score   support
+
+          10       0.81      0.83      0.82       293
+          11       0.90      0.90      0.90       727
+          12       0.91      0.89      0.90       186
+
+    accuracy                           0.88      1206
+   macro avg       0.88      0.87      0.87      1206
+weighted avg       0.88      0.88      0.88      1206
+
+--------------------------------------------------
+
