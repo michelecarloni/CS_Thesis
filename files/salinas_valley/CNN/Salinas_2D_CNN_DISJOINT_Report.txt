@@ -1,0 +1,26 @@
+Salinas Valley - 2D CNN Classification (DISJOINT SPATIAL SPLIT)
+Overall Accuracy: 77.28%
+============================================================
+
+                           precision    recall  f1-score   support
+
+    Brocoli_green_weeds_1       1.00      0.99      0.99       889
+    Brocoli_green_weeds_2       0.99      1.00      1.00      1610
+                   Fallow       0.52      0.35      0.42       784
+        Fallow_rough_plow       0.99      0.99      0.99       649
+            Fallow_smooth       0.99      0.77      0.87      1252
+                  Stubble       1.00      1.00      1.00      1835
+                   Celery       1.00      1.00      1.00      1626
+         Grapes_untrained       0.63      0.36      0.46      5159
+     Soil_vinyard_develop       1.00      1.00      1.00      2714
+Corn_senesced_green_weeds       0.91      0.84      0.87      1525
+      Lettuce_romaine_4wk       0.38      0.97      0.55       471
+      Lettuce_romaine_5wk       1.00      1.00      1.00       881
+      Lettuce_romaine_6wk       1.00      0.99      0.99       426
+      Lettuce_romaine_7wk       0.96      0.99      0.97       491
+        Vinyard_untrained       0.40      0.67      0.50      3243
+ Vinyard_vertical_trellis       1.00      0.96      0.98       714
+
+                 accuracy                           0.77     24269
+                macro avg       0.86      0.87      0.85     24269
+             weighted avg       0.81      0.77      0.77     24269

@@ -1,0 +1,29 @@
+Salinas Valley - 1D Pixel-Based Classification (No Locality)
+Overall Accuracy: 88.45%
+============================================================
+
+                           precision    recall  f1-score   support
+
+    Brocoli_green_weeds_1       1.00      0.98      0.99       598
+    Brocoli_green_weeds_2       0.99      1.00      1.00      1126
+                   Fallow       0.90      0.93      0.91       561
+        Fallow_rough_plow       0.97      0.99      0.98       445
+            Fallow_smooth       0.97      0.96      0.97       812
+                  Stubble       1.00      1.00      1.00      1183
+                   Celery       0.97      0.99      0.98      1080
+         Grapes_untrained       0.73      0.85      0.79      3364
+     Soil_vinyard_develop       0.98      1.00      0.99      1858
+Corn_senesced_green_weeds       0.86      0.90      0.88      1002
+      Lettuce_romaine_4wk       0.91      0.85      0.88       324
+      Lettuce_romaine_5wk       0.94      0.99      0.96       570
+      Lettuce_romaine_6wk       0.92      0.97      0.95       263
+      Lettuce_romaine_7wk       0.97      0.88      0.92       310
+        Vinyard_untrained       0.73      0.53      0.62      2210
+ Vinyard_vertical_trellis       0.99      0.93      0.96       533
+
+                 accuracy                           0.88     16239
+                macro avg       0.93      0.92      0.92     16239
+             weighted avg       0.88      0.88      0.88     16239
+
+
+
