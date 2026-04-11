@@ -29,8 +29,8 @@ print(f"Feature reduction Enabled: {USE_FEATURE_SELECTION}")
 # 3) Load and Filter the Data
 main_path = os.path.join("..", "ds")
 
-data_path = os.path.join(main_path, 'indiana_pines/indian_pines_corrected.mat')
-gt_path = os.path.join(main_path, 'indiana_pines/indian_pines_gt.mat')
+data_path = os.path.join(main_path, 'indian_pines/indian_pines_corrected.mat')
+gt_path = os.path.join(main_path, 'indian_pines/indian_pines_gt.mat')
 
 data = sio.loadmat(data_path)['indian_pines_corrected']
 gt = sio.loadmat(gt_path)['indian_pines_gt']
