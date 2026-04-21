@@ -2,6 +2,9 @@ import scipy.io as sio
 import numpy as np
 import os
 from sklearn.preprocessing import MinMaxScaler
+from data_structures import *
+import matplotlib.pyplot as plt
+
 
 def load_hyperspectral_dataset(dataset_name, classes_to_drop=None):
     """
@@ -16,31 +19,11 @@ def load_hyperspectral_dataset(dataset_name, classes_to_drop=None):
         y (np.ndarray): Flattened label array of shape (n_pixels,).
     """
     
-    # dataset paths
-    paths = {
-        'indian_pines': {
-            'data': 'ds/indian_pines/indian_pines_corrected.mat',
-            'gt': 'ds/indian_pines/indian_pines_gt.mat'
-        },
-        'salinas_valley': {
-            'data': 'ds/salinas_valley/salinas_valley_corrected.mat',
-            'gt': 'ds/salinas_valley/salinas_valley_gt.mat'
-        },
-        'pavia_center': {
-            'data': 'ds/pavia_center/pavia_center.mat',
-            'gt': 'ds/pavia_center/pavia_center_gt.mat'
-        },
-        'pavia_university': {
-            'data': 'ds/pavia_university/pavia_university.mat',
-            'gt': 'ds/pavia_university/pavia_university_gt.mat'
-        }
-    }
-    
-    if dataset_name not in paths:
-        raise ValueError(f"Dataset '{dataset_name}' not found. Choose from {list(paths.keys())}")
+    if dataset_name not in DATASET_PATHS:
+        raise ValueError(f"Dataset '{dataset_name}' not found. Choose from {list(DATASET_PATHS.keys())}")
         
-    data_dict = sio.loadmat(paths[dataset_name]['data'])
-    gt_dict = sio.loadmat(paths[dataset_name]['gt'])
+    data_dict = sio.loadmat(DATASET_PATHS[dataset_name]['data'])
+    gt_dict = sio.loadmat(DATASET_PATHS[dataset_name]['gt'])
     
     # Helper to dynamically extract the actual data array, ignoring meta-keys
     def extract_array(mat_dict):
@@ -81,35 +64,6 @@ def print_class_distribution(dataset_name, y):
         dataset_name (str): Name of the dataset to map numeric labels to strings.
         y (np.ndarray): Flattened array of labels.
     """
-
-    # Standard class mappings for the 4 hyperspectral datasets
-    DATASET_CLASS_NAMES = {
-        'indian_pines': {
-            0: 'Background', 1: 'Alfalfa', 2: 'Corn-notill', 3: 'Corn-mintill', 
-            4: 'Corn', 5: 'Grass-pasture', 6: 'Grass-trees', 7: 'Grass-pasture-mowed',
-            8: 'Hay-windrowed', 9: 'Oats', 10: 'Soybean-notill', 11: 'Soybean-mintill',
-            12: 'Soybean-clean', 13: 'Wheat', 14: 'Woods', 15: 'Buildings-Grass-Trees-Drives',
-            16: 'Stone-Steel-Towers'
-        },
-        'salinas_valley': {
-            0: 'Background', 1: 'Brocoli_green_weeds_1', 2: 'Brocoli_green_weeds_2', 
-            3: 'Fallow', 4: 'Fallow_rough_plow', 5: 'Fallow_smooth', 6: 'Stubble', 
-            7: 'Celery', 8: 'Grapes_untrained', 9: 'Soil_vinyard_develop', 
-            10: 'Corn_senesced_green_weeds', 11: 'Lettuce_romaine_4wk', 
-            12: 'Lettuce_romaine_5wk', 13: 'Lettuce_romaine_6wk', 14: 'Lettuce_romaine_7wk', 
-            15: 'Vinyard_untrained', 16: 'Vinyard_vertical_trellis'
-        },
-        'pavia_university': {
-            0: 'Background', 1: 'Asphalt', 2: 'Meadows', 3: 'Gravel', 4: 'Trees',
-            5: 'Painted metal sheets', 6: 'Bare Soil', 7: 'Bitumen',
-            8: 'Self-Blocking Bricks', 9: 'Shadows'
-        },
-        'pavia_center': {
-            0: 'Background', 1: 'Water', 2: 'Trees', 3: 'Asphalt', 
-            4: 'Self-Blocking Bricks', 5: 'Bitumen', 6: 'Tiles', 7: 'Shadows', 
-            8: 'Meadows', 9: 'Bare Soil'
-        }
-    }
 
     if dataset_name not in DATASET_CLASS_NAMES:
         raise ValueError(f"Dataset '{dataset_name}' mappings not found.")
@@ -163,4 +117,99 @@ def normalize_features(X):
     print("Dataset normalized using Min-Max scaling (Feature-wise).")
     print(f"Global Min: {np.min(X_normalized):.2f}, Global Max: {np.max(X_normalized):.2f}")
         
-    return X_normalized, scaler
+    return X_normalized
+
+
+
+
+
+
+
+
+
+def get_wavelengths(dataset_name, n_bands):
+    """
+    Approximates the true physical wavelengths (in nanometers) for the dataset's bands.
+    Accounts for the specific water absorption bands removed from AVIRIS datasets.
+    """
+    if dataset_name in ['indian_pines', 'salinas_valley']:
+        # AVIRIS Sensor: ~400 nm to 2500 nm originally over 224 bands
+        full_wavelengths = np.linspace(400, 2500, 224)
+        
+        if dataset_name == 'indian_pines' and n_bands == 200:
+            # Indian Pines removed bands: [104-108], [150-163], [220-224] (1-indexed)
+            drop_indices = list(range(103, 108)) + list(range(149, 163)) + list(range(219, 224))
+            return np.delete(full_wavelengths, drop_indices)
+            
+        elif dataset_name == 'salinas_valley' and n_bands == 204:
+            # Salinas removed bands: [108-112], [154-167], 224 (1-indexed)
+            drop_indices = list(range(107, 112)) + list(range(153, 167)) + [223]
+            return np.delete(full_wavelengths, drop_indices)
+            
+        else:
+            # Fallback if you have a slightly different AVIRIS cut
+            return np.linspace(400, 2500, n_bands)
+            
+    elif dataset_name in ['pavia_university', 'pavia_center']:
+        # ROSIS Sensor: ~430 nm to 860 nm
+        return np.linspace(430, 860, n_bands)
+        
+    else:
+        # Generic fallback
+        return np.arange(1, n_bands + 1)
+
+
+def plot_spectral_signatures(dataset_name, classes_to_plot=None, background=False):
+    """
+    Plots the mean spectral signature against actual Wavelengths (nm).
+
+    background: True -> background included. False -> Background removed
+    """
+    if dataset_name not in DATASET_CLASS_NAMES:
+        raise ValueError(f"Dataset '{dataset_name}' mappings not found.")
+        
+    class_mapping = DATASET_CLASS_NAMES[dataset_name]
+    
+    # Load data
+    classes_to_drop = [] if background else [0]
+    X, y = load_hyperspectral_dataset(dataset_name, classes_to_drop=classes_to_drop)
+    
+    # Determine classes
+    if classes_to_plot is None:
+        classes_to_plot = np.unique(y).tolist()
+    else:
+        classes_to_plot = list(classes_to_plot)
+        if not background and 0 in classes_to_plot:
+            classes_to_plot.remove(0)
+
+    # Get actual physical wavelengths for the x-axis
+    n_bands = X.shape[1]
+    wavelengths = get_wavelengths(dataset_name, n_bands)
+    
+    plt.figure(figsize=(12, 6))
+    
+    for cls_id in classes_to_plot:
+        X_cls = X[y == cls_id]
+        if len(X_cls) == 0:
+            continue
+            
+        cls_name = class_mapping.get(cls_id, f"Class {cls_id}")
+        mean_signature = np.mean(X_cls, axis=0)
+        std_signature = np.std(X_cls, axis=0)
+        
+        # Plot using wavelengths
+        line = plt.plot(wavelengths, mean_signature, label=f"{cls_name} (n={len(X_cls)})", linewidth=2)[0]
+        
+        plt.fill_between(wavelengths, 
+                         mean_signature - std_signature, 
+                         mean_signature + std_signature, 
+                         color=line.get_color(), alpha=0.2)
+
+    plt.title(f"Raw Mean Spectral Signatures - {dataset_name.replace('_', ' ').title()}", fontsize=14, pad=15)
+    plt.xlabel("Wavelength (nm)", fontsize=12)
+    plt.ylabel("Raw Reflectance Intensity (16-bit)", fontsize=12)
+    plt.grid(True, linestyle='--', alpha=0.7)
+    
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
+    plt.tight_layout()
+    plt.show()
