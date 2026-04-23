@@ -160,10 +160,18 @@ def get_sensor_specs(dataset_name, n_bands):
         full_wavelengths = np.linspace(430, 860, n_bands)
         return full_wavelengths, np.arange(n_bands), []
 
+
+
+
+
+
+
+
 def plot_spectral_signatures(dataset_name, classes_to_plot=None, background=False):
     """
     Plots the mean spectral signature with true physical gaps and red shaded
     regions for missing water absorption bands.
+    Legend includes the class ID before the class name.
     """
     if dataset_name not in DATASET_CLASS_NAMES:
         raise ValueError(f"Dataset '{dataset_name}' mappings not found.")
@@ -202,11 +210,11 @@ def plot_spectral_signatures(dataset_name, classes_to_plot=None, background=Fals
             
         cls_name = class_mapping.get(cls_id, f"Class {cls_id}")
         
-        # Calculate stats for the valid 200 bands
+        # Calculate stats for the valid bands
         mean_valid = np.mean(X_cls, axis=0)
         std_valid = np.std(X_cls, axis=0)
         
-        # Create empty arrays of size 224 filled with NaN
+        # Create empty arrays filled with NaN
         mean_full = np.full(len(full_wavelengths), np.nan)
         std_full = np.full(len(full_wavelengths), np.nan)
         
@@ -214,15 +222,18 @@ def plot_spectral_signatures(dataset_name, classes_to_plot=None, background=Fals
         mean_full[valid_indices] = mean_valid
         std_full[valid_indices] = std_valid
         
-        # Plot the data (Matplotlib automatically breaks the line at NaNs!)
-        line = plt.plot(full_wavelengths, mean_full, label=f"{cls_name} (n={len(X_cls)})", linewidth=2)[0]
+        # --- NEW LOGIC: Format the label string to include the ID ---
+        label_str = f"{cls_id} {cls_name} (n={len(X_cls)})"
+        
+        # Plot the data
+        line = plt.plot(full_wavelengths, mean_full, label=label_str, linewidth=2)[0]
         
         plt.fill_between(full_wavelengths, 
                          mean_full - std_full, 
                          mean_full + std_full, 
                          color=line.get_color(), alpha=0.2)
                          
-        by_label[f"{cls_name} (n={len(X_cls)})"] = line
+        by_label[label_str] = line
 
     # Formatting
     plt.title(f"Raw Mean Spectral Signatures - {dataset_name.replace('_', ' ').title()}", fontsize=14, pad=15)
@@ -234,6 +245,7 @@ def plot_spectral_signatures(dataset_name, classes_to_plot=None, background=Fals
     plt.legend(by_label.values(), by_label.keys(), bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
     plt.tight_layout()
     plt.show()
+
 
 
 
