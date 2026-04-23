@@ -1,0 +1,22 @@
+--- Classification Report ---
+Model:   decision_tree
+Dataset: pavia_university
+Dropped: [0]
+Train samples per class cap: 800
+----------------------------------------
+
+              precision    recall  f1-score   support
+
+           1       0.94      0.81      0.87      1326
+           2       0.93      0.78      0.85      3730
+           3       0.56      0.74      0.64       420
+           4       0.71      0.93      0.81       613
+           5       0.97      1.00      0.99       269
+           6       0.58      0.81      0.68      1006
+           7       0.63      0.85      0.72       266
+           8       0.76      0.74      0.75       737
+           9       1.00      1.00      1.00       189
+
+    accuracy                           0.81      8556
+   macro avg       0.79      0.85      0.81      8556
+weighted avg       0.84      0.81      0.82      8556

@@ -1,0 +1,22 @@
+--- Classification Report ---
+Model:   logistic_regression
+Dataset: pavia_center
+Dropped: [0]
+Train samples per class cap: 800
+----------------------------------------
+
+              precision    recall  f1-score   support
+
+           1       1.00      1.00      1.00     13194
+           2       0.97      0.90      0.93      1520
+           3       0.77      0.93      0.84       618
+           4       0.56      0.81      0.66       537
+           5       0.92      0.88      0.90      1317
+           6       0.85      0.97      0.91      1850
+           7       0.94      0.82      0.88      1457
+           8       1.00      0.97      0.98      8565
+           9       0.99      1.00      0.99       573
+
+    accuracy                           0.96     29631
+   macro avg       0.89      0.92      0.90     29631
+weighted avg       0.97      0.96      0.97     29631

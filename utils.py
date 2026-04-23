@@ -117,7 +117,8 @@ def normalize_features(X):
     print("Dataset normalized using Min-Max scaling (Feature-wise).")
     print(f"Global Min: {np.min(X_normalized):.2f}, Global Max: {np.max(X_normalized):.2f}")
         
-    return X_normalized
+    # FIX: Add ', scaler' here!
+    return X_normalized, scaler
 
 
 
