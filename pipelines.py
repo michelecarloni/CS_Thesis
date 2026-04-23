@@ -11,7 +11,7 @@ from sklearn.metrics import classification_report, confusion_matrix, accuracy_sc
 from utils import load_hyperspectral_dataset, normalize_features
 
 
-def pipeline_standard_ml_algo(dataset_config_dict, save_dir, use_undersampling=True):
+def pipeline_standard_ml_algo(dataset_config_dict, save_dir, use_undersampling=False):
     """
     Trains and evaluates 4 baseline ML models on multiple datasets.
     

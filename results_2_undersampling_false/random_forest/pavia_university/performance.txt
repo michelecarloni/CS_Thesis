@@ -1,0 +1,22 @@
+--- Classification Report ---
+Model:    random_forest
+Dataset:  pavia_university
+Strategy: Cost-Sensitive (Balanced Weights)
+Overall Accuracy: 0.9215
+----------------------------------------
+
+              precision    recall  f1-score   support
+
+           1       0.93      0.93      0.93      1326
+           2       0.93      0.98      0.96      3730
+           3       0.85      0.77      0.81       420
+           4       0.96      0.89      0.92       613
+           5       1.00      0.99      0.99       269
+           6       0.94      0.79      0.86      1006
+           7       0.90      0.77      0.83       266
+           8       0.82      0.90      0.86       737
+           9       1.00      1.00      1.00       189
+
+    accuracy                           0.92      8556
+   macro avg       0.92      0.89      0.91      8556
+weighted avg       0.92      0.92      0.92      8556

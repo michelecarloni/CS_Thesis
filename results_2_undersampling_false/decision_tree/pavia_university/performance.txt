@@ -1,0 +1,22 @@
+--- Classification Report ---
+Model:    decision_tree
+Dataset:  pavia_university
+Strategy: Cost-Sensitive (Balanced Weights)
+Overall Accuracy: 0.8841
+----------------------------------------
+
+              precision    recall  f1-score   support
+
+           1       0.89      0.90      0.89      1326
+           2       0.93      0.94      0.93      3730
+           3       0.71      0.69      0.70       420
+           4       0.91      0.89      0.90       613
+           5       0.99      1.00      0.99       269
+           6       0.81      0.79      0.80      1006
+           7       0.78      0.72      0.75       266
+           8       0.79      0.81      0.80       737
+           9       1.00      1.00      1.00       189
+
+    accuracy                           0.88      8556
+   macro avg       0.87      0.86      0.86      8556
+weighted avg       0.88      0.88      0.88      8556
