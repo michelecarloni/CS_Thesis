@@ -11,6 +11,11 @@ from sklearn.metrics import classification_report, confusion_matrix, accuracy_sc
 from utils import load_hyperspectral_dataset, normalize_features
 
 
+"""
+Pipeline called for the first experiment (First Baseline):
+    - Datasets: indian_pines, salinas_valley, pavia_center, pavia_university
+    - Algorithms: Decision Tree, Random Forest, Linear SVM, Linear Regression
+"""
 def pipeline_standard_ml_algo(dataset_config_dict, save_dir, use_undersampling=False):
     """
     Trains and evaluates 4 baseline ML models on multiple datasets.
@@ -146,4 +151,6 @@ def pipeline_standard_ml_algo(dataset_config_dict, save_dir, use_undersampling=F
         f.write(md_content)
         
     print(f"Saved accuracy summary table to: {md_path}")
+
+
 
