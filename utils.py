@@ -371,3 +371,5 @@ def plot_color_composites(dataset_name, classes_to_plot=None, composites=None):
         
     plt.tight_layout()
     plt.show()
+
+
