@@ -11,6 +11,7 @@ from sklearn.metrics import classification_report, confusion_matrix, accuracy_sc
 from utils import load_hyperspectral_dataset, normalize_features
 
 
+
 """
 Pipeline called for the first experiment (First Baseline):
     - Datasets: indian_pines, salinas_valley, pavia_center, pavia_university
@@ -154,3 +155,8 @@ def pipeline_standard_ml_algo(dataset_config_dict, save_dir, use_undersampling=F
 
 
 
+
+
+
+def pipeline_H2Crop_standard_ML_algo(save_dir, detail_layer, static, limit):
+    pass

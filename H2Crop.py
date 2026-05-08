@@ -75,7 +75,7 @@ class H2Crop:
         return self._load_single_file(random_file, detail_layer, static)
 
 
-    def load_h5_data(self, detail_layer=None, static=False, limit=5):
+    def load_h5_data(self, detail_layer=None, static=False, limit=1):
         """
         Loads multiple .h5 files into a list of dictionaries.
         
@@ -96,3 +96,18 @@ class H2Crop:
         print(f"Successfully loaded {len(loaded_data)} files into memory.")
         return loaded_data
 
+
+    def upsample_hyperspectral(self, hyper_data):
+        """
+        Upsamples the 64x64 hyperspectral array to 192x192 to match Sentinel-2 and labels resolution.
+        Uses nearest-neighbor interpolation to maintain exact spectral purity.
+        
+        Parameters:
+        - hyper_data: numpy array of shape (Channels, 64, 64)
+        
+        Returns:
+        - numpy array of shape (Channels, 192, 192)
+        """
+        # Repeat 3 times along the height (axis 1), then 3 times along the width (axis 2)
+        upsampled = np.repeat(np.repeat(hyper_data, 3, axis=1), 3, axis=2)
+        return upsampled
