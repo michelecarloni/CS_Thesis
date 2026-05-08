@@ -77,23 +77,40 @@ class H2Crop:
 
     def load_h5_data(self, detail_layer=None, static=False, limit=1):
         """
-        Loads multiple .h5 files into a list of dictionaries.
-        
-        WARNING: Do not set 'limit' too high without vast amounts of RAM. 
-        Loading all 16,344 files simultaneously will crash standard systems.
+        Loads a specified number of random .h5 files strictly from the official training list.
         """
-        all_files = [f for f in os.listdir(self.h5_dir) if f.endswith('.h5')]
         
-        if limit:
-            all_files = all_files[:limit]
+        # Path of the training list
+        train_list_path = os.path.join(self.dataset_path, 'data_list', 'train.txt')
+        
+        if not os.path.exists(train_list_path):
+            print(f"Error: Training list not found at {train_list_path}")
+            print("Please verify the exact name of the training list file in the data_list folder.")
+            return []
             
+        # Read the filenames from the training list
+        with open(train_list_path, 'r') as f:
+            train_files = [line.strip() for line in f.readlines() if line.strip()]
+
+        train_files = [f if f.endswith('.h5') else f + '.h5' for f in train_files]
+        
+        if len(train_files) == 0:
+            print("Error: The training list appears to be empty.")
+            return []
+            
+
+        actual_limit = min(limit, len(train_files))
+        
+        # Randomly sample the files Without duplicates
+        sampled_files = random.sample(train_files, actual_limit)
+        
         loaded_data = []
-        for filename in all_files:
+        for filename in sampled_files:
             data_dict = self._load_single_file(filename, detail_layer, static)
             if data_dict:
                 loaded_data.append(data_dict)
                 
-        print(f"Successfully loaded {len(loaded_data)} files into memory.")
+        print(f"Successfully loaded {len(loaded_data)} random training files into memory.")
         return loaded_data
 
 
