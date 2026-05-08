@@ -1,0 +1,8 @@
+--- H2Crop ML Pipeline Configuration ---
+from_train: False
+limit: 300
+path: None
+detail_layer: 0
+static: True
+keep_prior: False
+total_samples (balancing target): 100000
