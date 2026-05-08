@@ -176,3 +176,96 @@ class H2Crop:
         # Repeat 3 times along the height (axis 1), then 3 times along the width (axis 2)
         upsampled = np.repeat(np.repeat(hyper_data, 3, axis=1), 3, axis=2)
         return upsampled
+    
+
+    def balance_pixels(self, X, y, total_samples=100000):
+        """
+        Balances the dataset evenly across all classes, aiming for a total number of samples.
+        Automatically caps the size if the rarest class doesn't have enough pixels.
+        
+        Parameters:
+        - X: Flattened feature matrix (Pixels, Channels)
+        - y: Flattened label array (Pixels,)
+        - total_samples: The target total size for the final dataset (e.g., 100000)
+        
+        Returns:
+        - X_final, y_final: Perfectly balanced arrays.
+        """
+        unique_classes, class_counts = np.unique(y, return_counts=True)
+        num_classes = len(unique_classes)
+        
+        print("\n--- Pixel Balancing ---")
+        print("Original Class Distribution:")
+        for cls, count in zip(unique_classes, class_counts):
+            print(f" - Class {cls}: {count} pixels")
+            
+        # Calculate how many pixels we need per class to hit the total_samples target
+        if total_samples is not None:
+            desired_per_class = total_samples // num_classes
+            
+            # Protect against asking for more pixels than the rarest class actually has
+            rarest_class_count = np.min(class_counts)
+            target_per_class = min(desired_per_class, rarest_class_count)
+            
+            if target_per_class < desired_per_class:
+                print(f"\nWarning: Target was {desired_per_class} per class, but the rarest class only has {rarest_class_count}.")
+                print(f"Adjusting to {rarest_class_count} per class to maintain a mathematically perfect balance.")
+        else:
+            # If no total is given, just balance to the rarest class
+            target_per_class = np.min(class_counts)
+            
+        print(f"\nBalancing dataset to {target_per_class} pixels per class...")
+        
+        X_balanced_list = []
+        y_balanced_list = []
+        
+        for cls in unique_classes:
+            # Find all rows belonging to this class
+            cls_indices = np.where(y == cls)[0]
+            
+            # Randomly sample the exact number needed
+            sampled_indices = np.random.choice(cls_indices, size=target_per_class, replace=False)
+            
+            X_balanced_list.append(X[sampled_indices])
+            y_balanced_list.append(y[sampled_indices])
+            
+        # Stack everything back together
+        X_final = np.vstack(X_balanced_list)
+        y_final = np.concatenate(y_balanced_list)
+        
+        actual_total = len(y_final)
+        print(f"Final Balanced Shape: X={X_final.shape}, y={y_final.shape} (Total: {actual_total})")
+        
+        return X_final, y_final
+    
+
+    def drop_classes(self, X, y, classes_to_drop=None):
+        """
+        Removes specific classes from the flattened dataset.
+        
+        Parameters:
+        - X: Flattened feature matrix (Pixels, Channels)
+        - y: Flattened label array (Pixels,)
+        - classes_to_drop: List of class integers to remove (e.g., [0, 5])
+        
+        Returns:
+        - X_filtered, y_filtered: Arrays with the specified classes removed.
+        """
+        if not classes_to_drop:
+            return X, y
+            
+        print(f"\n--- Dropping Classes: {classes_to_drop} ---")
+        
+        # creating mask
+        valid_mask = ~np.isin(y, classes_to_drop)
+        
+        # Applying mask
+        X_filtered = X[valid_mask]
+        y_filtered = y[valid_mask]
+        
+        pixels_dropped = len(y) - len(y_filtered)
+        print(f"Original shape: {y.shape[0]} pixels")
+        print(f"New shape:      {y_filtered.shape[0]} pixels")
+        print(f"Dropped {pixels_dropped} pixels belonging to classes {classes_to_drop}.")
+        
+        return X_filtered, y_filtered
