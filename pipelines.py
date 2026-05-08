@@ -7,10 +7,21 @@ from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import LinearSVC
-from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+from sklearn.linear_model import SGDClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, ConfusionMatrixDisplay
 from utils import load_hyperspectral_dataset, normalize_features
+from H2Crop import H2Crop
 
+# cuML models
+from cuml.ensemble import RandomForestClassifier as cuRF
+from cuml.linear_model import MBSGDClassifier as cuMBSGD
+from cuml.linear_model import LogisticRegression as cuLogReg
+from cuml.svm import LinearSVC as cuSVC
+from cuml.multiclass import OneVsRestClassifier
 
+import cupy as cp
+import math
 
 """
 Pipeline called for the first experiment (First Baseline):
@@ -158,5 +169,182 @@ def pipeline_standard_ml_algo(dataset_config_dict, save_dir, use_undersampling=F
 
 
 
-def pipeline_H2Crop_standard_ML_algo(save_dir, detail_layer, static, limit):
-    pass
+
+def pipeline_H2Crop_standard_ML_algo(save_results_dir, from_train, limit=1, path=None, detail_layer=None, static=False, keep_prior=False, total_samples=100000, classes_to_drop=None):
+    """
+    End-to-end pipeline to train and evaluate 4 baseline ML algorithms on H2Crop data.
+    Automatically runs 8 experiments (4 algorithms x 2 modalities) on the same sampled files.
+    BOOST: Accelerated with NVIDIA GPU using RAPIDS cuML.
+    """
+    
+    # Directories setup
+    os.makedirs(save_results_dir, exist_ok=True)
+    config_path = os.path.join(save_results_dir, "configuration.txt")
+    
+    with open(config_path, "w") as f:
+        f.write("--- H2Crop ML Pipeline Configuration ---\n")
+        f.write(f"from_train: {from_train}\n")
+        f.write(f"limit: {limit}\n")
+        f.write(f"path: {path}\n")
+        f.write(f"detail_layer: {detail_layer}\n")
+        f.write(f"static: {static}\n")
+        f.write(f"keep_prior: {keep_prior}\n")
+        f.write(f"total_samples (balancing target): {total_samples}\n")
+        
+    print(f"Configuration saved to {config_path}")
+
+    # Loader Initialization
+    loader = H2Crop() 
+    
+    print("\nGenerating master file list...")
+    master_file_list = loader.get_file_list(from_train=from_train, path=path, limit=limit)
+    
+    if not master_file_list:
+        print("Pipeline aborted: No files found.")
+        return
+
+    # Loop Through Both Modalities (8 Experiments Total)
+    for modality in ["hyperspectral", "multispectral"]:
+        print(f"\n{'='*50}")
+        print(f"STARTING PIPELINE FOR: {modality.upper()}")
+        print(f"{'='*50}")
+        
+        ml_models = {
+            "decision_tree": cuRF(n_estimators=1, random_state=42),
+            "random_forest": cuRF(n_estimators=100, random_state=42),
+            "logistic_regression": OneVsRestClassifier(cuMBSGD(loss='log', batch_size=2048)),
+            "linear_svm": OneVsRestClassifier(cuMBSGD(loss='hinge', batch_size=2048))
+
+            # "decision_tree": DecisionTreeClassifier(random_state=42),
+            # "random_forest": RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1),
+            # "logistic_regression": LogisticRegression(max_iter=2000, random_state=42),
+            # "linear_svm": LinearSVC(max_iter=2000, dual=False, random_state=42)
+        }
+        
+        print("Loading data...")
+
+        # Load the data
+        batch = loader.load_h5_data(
+            file_list=master_file_list, 
+            detail_layer=detail_layer, 
+            static=static, 
+            data_type=modality, 
+            keep_prior=keep_prior
+        )
+
+        print("Data loaded succesfully!")
+        
+        if not batch:
+            print(f"Skipping {modality} due to loading error.")
+            continue
+
+        # Preprocess and Flatten Pixels 
+        print("Flattening spatial grids into tabular (X, y) format...")
+        X_list = []
+        y_list = []
+        
+        for sample in batch:
+            X_img = sample[modality]
+            y_img = sample['labels']
+            
+            # Upsample hyperspectral from 64x64 to 192x192
+            if modality == "hyperspectral":
+                X_img = loader.upsample_hyperspectral(X_img)
+                
+            # Transpose necessary for stacking together
+            X_img = np.transpose(X_img, (1, 2, 0))
+            
+            # Flatten to tabular format (Pixels, Channels)
+            X_flat = X_img.reshape(-1, X_img.shape[-1])
+            y_flat = y_img.reshape(-1)
+            
+            # Handle Priors if requested
+            if keep_prior and 'prior' in sample:
+                prior_img = sample['prior']
+                prior_flat = prior_img.reshape(-1, 1)
+                X_flat = np.hstack((X_flat, prior_flat))
+                
+            X_list.append(X_flat)
+            y_list.append(y_flat)
+            
+        X = np.vstack(X_list)
+        y = np.concatenate(y_list)
+        
+        # Drop unecessary classes
+        X, y = loader.drop_classes(X, y, classes_to_drop=classes_to_drop)
+
+        # extract a balance dataset
+        X, y = loader.balance_pixels(X, y, total_samples=total_samples)
+
+        print("Splitting into Train/Test sets and scaling features...")
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+        
+        scaler = StandardScaler()
+        
+        # Cast Features to float32: critical for GPU memory efficiency
+        X_train_scaled = scaler.fit_transform(X_train).astype(np.float32)
+        X_test_scaled = scaler.transform(X_test).astype(np.float32)
+        
+        # Cast Labels to int32: critical for classification algorithms
+        y_train = y_train.astype(np.int32)
+        y_test = y_test.astype(np.int32)
+
+        # Train loop
+        for algo_name, model in ml_models.items():
+            print(f"\n--> Training {algo_name} on NVIDIA GPU...")
+            
+            # Train the model
+            model.fit(X_train_scaled, y_train)
+            
+            # Force cupy to release all cached VRAM back to the GPU
+            cp.get_default_memory_pool().free_all_blocks()
+            cp.get_default_pinned_memory_pool().free_all_blocks()
+            
+            batch_size = 2048  # Kept small to guarantee it fits in VRAM
+            y_pred_list = []
+            
+            n_samples = X_test_scaled.shape[0]
+            n_batches = math.ceil(n_samples / batch_size)
+            
+            print(f"    Predicting in {n_batches} batches to save memory...")
+            for i in range(n_batches):
+                start_idx = i * batch_size
+                end_idx = min((i + 1) * batch_size, n_samples)
+                
+                # Predict a small chunk
+                batch_pred = model.predict(X_test_scaled[start_idx:end_idx])
+                
+                # Immediately pull the prediction back to standard CPU memory (NumPy)
+                if hasattr(batch_pred, 'get'):
+                    batch_pred = batch_pred.get()
+                else:
+                    batch_pred = np.array(batch_pred)
+                    
+                y_pred_list.append(batch_pred)
+                
+            # Combine all the chunks back together and ensure they are integers for sklearn
+            y_pred = np.concatenate(y_pred_list).astype(np.int32)
+            
+            # Clean up GPU memory again before the next algorithm starts
+            cp.get_default_memory_pool().free_all_blocks()
+            
+            # Save Classification Report & Confusion Matrix
+            algo_dir = os.path.join(save_results_dir, modality, algo_name)
+            os.makedirs(algo_dir, exist_ok=True)
+            
+            report_path = os.path.join(algo_dir, "performance.txt")
+            report = classification_report(y_test, y_pred, zero_division=0)
+            with open(report_path, "w") as f:
+                f.write(report)
+            print(f"    Saved: {report_path}")
+            
+            matrix_path = os.path.join(algo_dir, "confusion_matrix.png")
+            fig, ax = plt.subplots(figsize=(10, 8))
+            ConfusionMatrixDisplay.from_predictions(y_test, y_pred, ax=ax, cmap='Blues', colorbar=False)
+            plt.title(f"Confusion Matrix: {algo_name} ({modality})")
+            plt.tight_layout()
+            plt.savefig(matrix_path, dpi=300)
+            plt.close(fig)
+            print(f"    Saved: {matrix_path}")
+            
+    print("\nPipeline completed successfully! All 8 GPU-accelerated experiments saved.")
