@@ -210,15 +210,15 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, from_train, limit=1, path
         print(f"{'='*50}")
         
         ml_models = {
-            "decision_tree": cuRF(n_estimators=1, random_state=42),
-            "random_forest": cuRF(n_estimators=100, random_state=42),
-            "logistic_regression": OneVsRestClassifier(cuMBSGD(loss='log', batch_size=2048)),
-            "linear_svm": OneVsRestClassifier(cuMBSGD(loss='hinge', batch_size=2048))
+            # "decision_tree": cuRF(n_estimators=1, random_state=42),
+            # "random_forest": cuRF(n_estimators=100, random_state=42),
+            # "logistic_regression": OneVsRestClassifier(cuMBSGD(loss='log', batch_size=2048)),
+            # "linear_svm": OneVsRestClassifier(cuMBSGD(loss='hinge', batch_size=2048))
 
-            # "decision_tree": DecisionTreeClassifier(random_state=42),
-            # "random_forest": RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1),
-            # "logistic_regression": LogisticRegression(max_iter=2000, random_state=42),
-            # "linear_svm": LinearSVC(max_iter=2000, dual=False, random_state=42)
+            "decision_tree": DecisionTreeClassifier(random_state=42),
+            "random_forest": RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1),
+            "logistic_regression": LogisticRegression(max_iter=2000, random_state=42),
+            "linear_svm": LinearSVC(max_iter=2000, dual=False, random_state=42)
         }
         
         print("Loading data...")
