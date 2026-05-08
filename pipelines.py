@@ -217,8 +217,8 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, from_train, limit=1, path
 
             "decision_tree": DecisionTreeClassifier(random_state=42),
             "random_forest": RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1),
-            "logistic_regression": LogisticRegression(max_iter=2000, random_state=42),
-            "linear_svm": LinearSVC(max_iter=2000, dual=False, random_state=42)
+            "logistic_regression": LogisticRegression(max_iter=1000, random_state=42),
+            "linear_svm": LinearSVC(max_iter=1000, dual=False, random_state=42)
         }
         
         print("Loading data...")
