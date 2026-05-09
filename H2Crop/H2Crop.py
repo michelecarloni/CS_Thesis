@@ -178,7 +178,7 @@ class H2Crop:
         return upsampled
     
 
-    def balance_pixels(self, X, y, total_samples=100000):
+    def balance_pixels(self, X, y, total_samples=100000, random_state=42):
         """
         Balances the dataset evenly across all classes, aiming for a total number of samples.
         Automatically caps the size if the rarest class doesn't have enough pixels.
@@ -187,7 +187,9 @@ class H2Crop:
         - X: Flattened feature matrix (Pixels, Channels)
         - y: Flattened label array (Pixels,)
         - total_samples: The target total size for the final dataset (e.g., 100000)
-        
+        - random_state: In this way when I pass the same X and y the picked samples will be the same
+                        Help with running first with hyperspectral and then multispectral
+
         Returns:
         - X_final, y_final: Perfectly balanced arrays.
         """
