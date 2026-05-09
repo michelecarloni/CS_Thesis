@@ -74,7 +74,7 @@ def pipeline_standard_ml_algo(dataset_config_dict, save_dir, use_undersampling=F
         X_train, X_test, y_train, y_test = train_test_split(
             X_norm, y, test_size=0.2, random_state=42, stratify=y
         )
-        
+
         # Apply Training Strategy
         if use_undersampling:
             print(f"Undersampling training data to max {target_train_samples} samples per class...")
@@ -429,7 +429,7 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, file_list, modality, load
     ml_models = {
         "decision_tree": DecisionTreeClassifier(random_state=42),
         "random_forest": RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1),
-        "logistic_regression": LogisticRegression(max_iter=2000, random_state=42, n_jobs=-1),
+        "logistic_regression": LogisticRegression(max_iter=2000, random_state=42),
         "linear_svm": LinearSVC(max_iter=2000, dual=False, random_state=42)
     }
     
@@ -476,6 +476,12 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, file_list, modality, load
             prior_flat = prior_img.reshape(-1, 1)
             X_flat = np.hstack((X_flat, prior_flat))
             
+        # Filter before you stack
+        if classes_to_drop is not None:
+            valid_mask = ~np.isin(y_flat, classes_to_drop)
+            X_flat = X_flat[valid_mask]
+            y_flat = y_flat[valid_mask]
+
         X_list.append(X_flat)
         y_list.append(y_flat)
         
@@ -484,6 +490,8 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, file_list, modality, load
     
     # Drop unecessary classes
     X, y = loader.drop_classes(X, y, classes_to_drop=classes_to_drop)
+
+    print("DEBUG")
 
     # extract a balance dataset
     X, y = loader.balance_pixels(X, y, total_samples=total_samples)

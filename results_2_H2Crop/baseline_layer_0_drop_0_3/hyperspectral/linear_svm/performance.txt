@@ -1,0 +1,11 @@
+                                precision    recall  f1-score   support
+
+pasture_meadow_grassland_grass       0.70      0.75      0.73      6000
+              tree_wood_forest       0.71      0.81      0.75      6000
+                  arable_crops       0.77      0.71      0.74      6000
+                  unmaintained       0.62      0.39      0.48      6000
+     permanent_crops_perennial       0.66      0.80      0.73      6000
+
+                      accuracy                           0.69     30000
+                     macro avg       0.69      0.69      0.68     30000
+                  weighted avg       0.69      0.69      0.68     30000
