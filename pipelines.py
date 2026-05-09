@@ -388,11 +388,16 @@ def pipeline_standard_ml_algo(dataset_config_dict, save_dir, use_undersampling=F
 
 
 
-def pipeline_H2Crop_standard_ML_algo(save_results_dir, file_list, modality, detail_layer=0, static=False, keep_prior=False, total_samples=100000, classes_to_drop=None):
+def pipeline_H2Crop_standard_ML_algo(save_results_dir, file_list, modality, loader=None, detail_layer=0, static=False, keep_prior=False, total_samples=100000, classes_to_drop=None):
     """
     Modular pipeline to train and evaluate 4 baseline ML algorithms on H2Crop data.
     Takes a pre-defined list of files and a specific modality to process.
     """
+
+    # Check Loader
+    if not loader:
+        print("Pipeline aborted: requiring loader")
+        return
 
     # Check Modality
     if modality.lower() not in ["hyperspectral", "multispectral"]:
@@ -419,9 +424,6 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, file_list, modality, deta
         f.write(f"classes_to_drop: {classes_to_drop}\n")
         
     print(f"Configuration saved to {config_path}")
-
-    # Loader Initialization
-    loader = H2Crop() 
     
     # Scikit-learn CPU Models
     ml_models = {
