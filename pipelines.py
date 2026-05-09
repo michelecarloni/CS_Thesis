@@ -12,6 +12,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, ConfusionMatrixDisplay
 from utils import load_hyperspectral_dataset, normalize_features
 from H2Crop.H2Crop import H2Crop
+from H2Crop.labels import h2crop_taxonomy_dict
 
 # cuML models
 from cuml.ensemble import RandomForestClassifier as cuRF
@@ -217,8 +218,8 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, from_train, limit=1, path
 
             "decision_tree": DecisionTreeClassifier(random_state=42),
             "random_forest": RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1),
-            "logistic_regression": LogisticRegression(max_iter=1000, random_state=42),
-            "linear_svm": LinearSVC(max_iter=1000, dual=False, random_state=42)
+            "logistic_regression": LogisticRegression(max_iter=2000, random_state=42),
+            "linear_svm": LinearSVC(max_iter=2000, dual=False, random_state=42)
         }
         
         print("Loading data...")
@@ -328,20 +329,52 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, from_train, limit=1, path
             # Clean up GPU memory again before the next algorithm starts
             cp.get_default_memory_pool().free_all_blocks()
             
+            # -------------------------------------------------------------
             # Save Classification Report & Confusion Matrix
+            # -------------------------------------------------------------
             algo_dir = os.path.join(save_results_dir, modality, algo_name)
             os.makedirs(algo_dir, exist_ok=True)
             
+            # 1. Dynamically grab the right names for the current classes
+            # model.classes_ contains the exact sorted array of integer IDs the model trained on
+            taxonomy_key = f'Taxonomy_{detail_layer}'
+            current_taxonomy = h2crop_taxonomy_dict.get(taxonomy_key, {})
+            
+            # Map the IDs to strings. Fallback to "Class X" if something is missing.
+            target_names = [current_taxonomy.get(c, f"Class {c}") for c in model.classes_]
+            
+            # 2. Save Classification Report (.txt)
             report_path = os.path.join(algo_dir, "performance.txt")
-            report = classification_report(y_test, y_pred, zero_division=0)
+            # We pass target_names here so your text file uses the words instead of numbers!
+            report = classification_report(y_test, y_pred, zero_division=0, target_names=target_names)
             with open(report_path, "w") as f:
                 f.write(report)
             print(f"    Saved: {report_path}")
             
+            # 3. Save Confusion Matrix (.png)
             matrix_path = os.path.join(algo_dir, "confusion_matrix.png")
-            fig, ax = plt.subplots(figsize=(10, 8))
-            ConfusionMatrixDisplay.from_predictions(y_test, y_pred, ax=ax, cmap='Blues', colorbar=False)
+            
+            # Dynamically scale the figure size. 10x8 is fine for Level 0, 
+            # but Level 3 might need a 30x24 inch canvas to fit all the words.
+            fig_size = max(10, len(target_names) * 0.4)
+            fig, ax = plt.subplots(figsize=(fig_size, fig_size * 0.8))
+            
+            ConfusionMatrixDisplay.from_predictions(
+                y_test, 
+                y_pred, 
+                ax=ax, 
+                cmap='Blues', 
+                colorbar=False,
+                display_labels=target_names # Inject the strings here
+            )
+            
             plt.title(f"Confusion Matrix: {algo_name} ({modality})")
+            
+            # CRITICAL: Rotate the x-axis labels by 45 degrees and align them to the right.
+            # Without this, long names like "pasture_meadow_grassland_grass" will overlap.
+            plt.xticks(rotation=45, ha='right', fontsize=9)
+            plt.yticks(fontsize=9)
+            
             plt.tight_layout()
             plt.savefig(matrix_path, dpi=300)
             plt.close(fig)
