@@ -6,8 +6,7 @@ from data_structures import *
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.colors as mcolors
-from H2Crop.labels import h2crop_taxonomy_dict
-
+from H2Crop.data_structures import h2crop_taxonomy_dict
 
 #-------------------------------------------------------
 # UTILS For indian_pines, salinas_valley, pavia_center, pavia_university

@@ -12,7 +12,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, ConfusionMatrixDisplay
 from utils import load_hyperspectral_dataset, normalize_features
 from H2Crop.H2Crop import H2Crop
-from H2Crop.labels import h2crop_taxonomy_dict
+from H2Crop.data_structures import h2crop_taxonomy_dict
 
 # cuML models
 from cuml.ensemble import RandomForestClassifier as cuRF
