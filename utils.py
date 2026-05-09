@@ -6,6 +6,7 @@ from data_structures import *
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.colors as mcolors
+from H2Crop.labels import h2crop_taxonomy_dict
 
 
 #-------------------------------------------------------
@@ -504,5 +505,126 @@ def visualize_sample(dataset_dict, detail_layer=0, classes_to_drop=None, externa
         frameon=False
     )
     
+    plt.tight_layout()
+    plt.show()
+
+
+
+
+# Assuming your dictionary is imported
+# from labels import h2crop_taxonomy_dict
+
+def plot_spectral_signatures_H2Crop(loader, file_list, modality, detail_layer=0, classes_to_show=None, show_background=False, max_samples_per_class=5000):
+    """
+    Extracts and plots the mean spectral signature for explicitly selected classes.
+    """
+    print(f"\nExtracting Spectral Signatures for {modality.upper()}...")
+    
+    # 1. Load the data
+    batch = loader.load_h5_data(
+        file_list=file_list, 
+        detail_layer=detail_layer, 
+        static=False, 
+        data_type=modality, 
+        keep_prior=False
+    )
+    
+    if not batch:
+        print("Error: No data loaded.")
+        return
+
+    # 2. Flatten and filter the pixels (Memory-Safe)
+    X_list = []
+    y_list = []
+    
+    for sample in batch:
+        X_img = sample[modality]
+        y_img = sample['labels']
+        
+        if modality == "hyperspectral":
+            X_img = loader.upsample_hyperspectral(X_img)
+            
+        X_img = np.transpose(X_img, (1, 2, 0))
+        X_flat = X_img.reshape(-1, X_img.shape[-1])
+        y_flat = y_img.reshape(-1)
+        
+        # ==========================================
+        # NEW: Positive Filtering Logic
+        # ==========================================
+        # Start by assuming we keep everything
+        valid_mask = np.ones_like(y_flat, dtype=bool)
+        
+        # If specific classes are requested, restrict the mask to only those
+        if classes_to_show is not None:
+            valid_mask = np.isin(y_flat, classes_to_show)
+            
+        # Handle the background class (0)
+        if not show_background:
+            # Force drop 0
+            valid_mask = valid_mask & (y_flat != 0)
+        elif classes_to_show is not None:
+            # If they want background AND specific classes, ensure 0 is added back in
+            valid_mask = valid_mask | (y_flat == 0)
+            
+        # Apply the final mask
+        X_flat = X_flat[valid_mask]
+        y_flat = y_flat[valid_mask]
+            
+        X_list.append(X_flat)
+        y_list.append(y_flat)
+        
+    X = np.vstack(X_list)
+    y = np.concatenate(y_list)
+    
+    # Flush memory
+    import gc
+    del X_list, y_list, batch
+    gc.collect()
+
+    # 3. Setup the Plot
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    taxonomy_key = f'Taxonomy_{detail_layer}'
+    current_taxonomy = h2crop_taxonomy_dict.get(taxonomy_key, {})
+    
+    unique_classes = np.unique(y)
+    
+    if len(unique_classes) == 0:
+        print("No pixels found for the selected classes in this file list.")
+        return
+        
+    cmap = plt.get_cmap('tab10' if len(unique_classes) <= 10 else 'tab20')
+    
+    # 4. Calculate Mean and Plot for each class
+    for i, c in enumerate(unique_classes):
+        class_name = current_taxonomy.get(c, f"Class {c}")
+        
+        class_pixels = X[y == c]
+        
+        # Subsample to speed up the math
+        if len(class_pixels) > max_samples_per_class:
+            rng = np.random.default_rng(42)
+            class_pixels = rng.choice(class_pixels, size=max_samples_per_class, replace=False)
+            
+        # Calculate Mean and Standard Deviation
+        mean_signature = np.mean(class_pixels, axis=0)
+        std_signature = np.std(class_pixels, axis=0)
+        
+        bands = np.arange(len(mean_signature))
+        color = cmap(i % cmap.N)
+        
+        # Plot line and variance
+        ax.plot(bands, mean_signature, label=f"{c}: {class_name}", color=color, linewidth=2)
+        ax.fill_between(bands, mean_signature - std_signature, mean_signature + std_signature, color=color, alpha=0.15)
+
+    # 5. Formatting the Graph
+    ax.set_title(f"Mean Spectral Signatures: {modality.capitalize()} (Layer {detail_layer})", fontsize=14, fontweight='bold')
+    ax.set_xlabel("Band Index", fontsize=12)
+    ax.set_ylabel("Reflectance Value", fontsize=12)
+    
+    # Position legend safely outside the plot
+    ax.legend(loc='center left', bbox_to_anchor=(1.02, 0.5), title=f"Classes (Layer {detail_layer})", frameon=False)
+    
+    ax.grid(True, linestyle='--', alpha=0.6)
     plt.tight_layout()
     plt.show()
