@@ -6,7 +6,7 @@ from data_structures import *
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.colors as mcolors
-from H2Crop.data_structures import h2crop_taxonomy_dict
+from H2Crop.data_structures import h2crop_taxonomy_dict, h2crop_band_mapping
 
 #-------------------------------------------------------
 # UTILS For indian_pines, salinas_valley, pavia_center, pavia_university
@@ -510,20 +510,23 @@ def visualize_sample(dataset_dict, detail_layer=0, classes_to_drop=None, externa
 
 
 
-# Assuming your dictionary is imported
-# from labels import h2crop_taxonomy_dict
+
+
+
 
 def plot_spectral_signatures_H2Crop(loader, file_list, modality, detail_layer=0, classes_to_show=None, show_background=False, max_samples_per_class=5000):
     """
-    Extracts and plots the mean spectral signature for explicitly selected classes.
+    Plots mean spectral signatures.
+    - Hyperspectral: Uses continuous lines with standard deviation shadows and gap breaks.
+    - Multispectral: Uses discrete error-bar (candlestick) plots WITHOUT connecting lines.
     """
     print(f"\nExtracting Spectral Signatures for {modality.upper()}...")
     
-    # 1. Load the data
+    # Load data
     batch = loader.load_h5_data(
         file_list=file_list, 
         detail_layer=detail_layer, 
-        static=False, 
+        static=True, 
         data_type=modality, 
         keep_prior=False
     )
@@ -532,7 +535,19 @@ def plot_spectral_signatures_H2Crop(loader, file_list, modality, detail_layer=0,
         print("Error: No data loaded.")
         return
 
-    # 2. Flatten and filter the pixels (Memory-Safe)
+    # Extract Valid Wavelengths
+    if modality == "multispectral":
+        wavelengths = np.array([490, 560, 665, 705, 740, 783, 842, 865, 1610, 2190])
+    else:
+        wavelength_list = []
+        num_bands = len(h2crop_band_mapping)
+        for i in range(num_bands):
+            val = h2crop_band_mapping.get(i, "NaN")
+            if str(val).lower() != "nan":
+                wavelength_list.append(float(val))
+        wavelengths = np.array(wavelength_list)
+
+    # Flatten and filter the pixels
     X_list = []
     y_list = []
     
@@ -547,25 +562,16 @@ def plot_spectral_signatures_H2Crop(loader, file_list, modality, detail_layer=0,
         X_flat = X_img.reshape(-1, X_img.shape[-1])
         y_flat = y_img.reshape(-1)
         
-        # ==========================================
-        # NEW: Positive Filtering Logic
-        # ==========================================
-        # Start by assuming we keep everything
         valid_mask = np.ones_like(y_flat, dtype=bool)
         
-        # If specific classes are requested, restrict the mask to only those
         if classes_to_show is not None:
             valid_mask = np.isin(y_flat, classes_to_show)
             
-        # Handle the background class (0)
         if not show_background:
-            # Force drop 0
             valid_mask = valid_mask & (y_flat != 0)
         elif classes_to_show is not None:
-            # If they want background AND specific classes, ensure 0 is added back in
             valid_mask = valid_mask | (y_flat == 0)
             
-        # Apply the final mask
         X_flat = X_flat[valid_mask]
         y_flat = y_flat[valid_mask]
             
@@ -575,55 +581,97 @@ def plot_spectral_signatures_H2Crop(loader, file_list, modality, detail_layer=0,
     X = np.vstack(X_list)
     y = np.concatenate(y_list)
     
-    # Flush memory
     import gc
     del X_list, y_list, batch
     gc.collect()
 
-    # 3. Setup the Plot
+    # Setup the Plot
     fig, ax = plt.subplots(figsize=(12, 6))
     
     taxonomy_key = f'Taxonomy_{detail_layer}'
     current_taxonomy = h2crop_taxonomy_dict.get(taxonomy_key, {})
     
     unique_classes = np.unique(y)
-    
     if len(unique_classes) == 0:
         print("No pixels found for the selected classes in this file list.")
         return
         
     cmap = plt.get_cmap('tab10' if len(unique_classes) <= 10 else 'tab20')
     
-    # 4. Calculate Mean and Plot for each class
+    # Calculate Mean and Plot for each class
     for i, c in enumerate(unique_classes):
         class_name = current_taxonomy.get(c, f"Class {c}")
-        
         class_pixels = X[y == c]
         
-        # Subsample to speed up the math
         if len(class_pixels) > max_samples_per_class:
             rng = np.random.default_rng(42)
             class_pixels = rng.choice(class_pixels, size=max_samples_per_class, replace=False)
             
-        # Calculate Mean and Standard Deviation
         mean_signature = np.mean(class_pixels, axis=0)
         std_signature = np.std(class_pixels, axis=0)
         
-        bands = np.arange(len(mean_signature))
         color = cmap(i % cmap.N)
         
-        # Plot line and variance
-        ax.plot(bands, mean_signature, label=f"{c}: {class_name}", color=color, linewidth=2)
-        ax.fill_between(bands, mean_signature - std_signature, mean_signature + std_signature, color=color, alpha=0.15)
+        # Split the plot logic for multispectral and hyperspectral
+        if modality == "multispectral":
+            # Using Jitter logic to make the candlesticks visible
+            num_classes_total = len(unique_classes)
+            jitter_spread = 15
+            
+            offset = (i - (num_classes_total / 2)) * (jitter_spread / num_classes_total)
+            jittered_wavelengths = wavelengths + offset
 
-    # 5. Formatting the Graph
+            ax.errorbar(
+                jittered_wavelengths,  
+                mean_signature, 
+                yerr=std_signature, 
+                fmt='o',           
+                color=color, 
+                ecolor=color,      
+                elinewidth=1.5,    
+                capsize=3,         
+                markersize=4,      
+                label=f"{c}: {class_name}",
+                alpha=0.8          
+            )
+            
+        else:
+            
+            plot_waves = []
+            plot_means = []
+            plot_stds = []
+            
+            for k in range(len(wavelengths)):
+                plot_waves.append(wavelengths[k])
+                plot_means.append(mean_signature[k])
+                plot_stds.append(std_signature[k])
+                
+                if k < len(wavelengths) - 1:
+                    if wavelengths[k+1] - wavelengths[k] > 20:
+                        plot_waves.append(wavelengths[k] + 1)
+                        plot_means.append(np.nan)             
+                        plot_stds.append(np.nan)              
+                        
+            plot_waves = np.array(plot_waves)
+            plot_means = np.array(plot_means)
+            plot_stds = np.array(plot_stds)
+            
+            ax.plot(plot_waves, plot_means, label=f"{c}: {class_name}", color=color, linewidth=2)
+            ax.fill_between(plot_waves, plot_means - plot_stds, plot_means + plot_stds, color=color, alpha=0.15)
+
+    # Explicitly Draw the Red Absorption Gaps (Hyperspectral Only)
+    # (Hardcoded red zones with intervals extracted from the data structure file)
+    if modality == "hyperspectral":
+        ax.axvspan(1318.88, 1461.1, color='red', alpha=0.15, label='Absorption / Removed Bands')
+        ax.axvspan(1759.51, 1939.14, color='red', alpha=0.15)
+
+    # Formatting the Graph
     ax.set_title(f"Mean Spectral Signatures: {modality.capitalize()} (Layer {detail_layer})", fontsize=14, fontweight='bold')
-    ax.set_xlabel("Band Index", fontsize=12)
+    ax.set_xlabel("Wavelength (nm)", fontsize=12)
     ax.set_ylabel("Reflectance Value", fontsize=12)
     
-    # Position legend safely outside the plot
     ax.legend(loc='center left', bbox_to_anchor=(1.02, 0.5), title=f"Classes (Layer {detail_layer})", frameon=False)
-    
     ax.grid(True, linestyle='--', alpha=0.6)
+    
     plt.tight_layout()
     plt.show()
