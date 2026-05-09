@@ -197,8 +197,8 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, file_list, modality, load
     print(f"{'='*50}")
 
     # Directories setup
-    os.makedirs(save_results_dir, exist_ok=True)
-    config_path = os.path.join(save_results_dir, "configuration.txt")
+    os.makedirs(os.path.join(save_results_dir, modality), exist_ok=True)
+    config_path = os.path.join(save_results_dir, modality, "configuration.txt")
     
     with open(config_path, "w") as f:
         f.write("--- H2Crop ML Pipeline Configuration ---\n")
