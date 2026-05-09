@@ -13,9 +13,9 @@ if __name__ == '__main__':
     modality = ["hyperspectral", "multispectral"]
     for mod in modality:
         pipeline_H2Crop_standard_ML_algo(save_results_dir='results_2_H2Crop/baseline_layer_0_drop_0_3',
-                                         from_train=from_train,
-                                         limit=limit,
-                                         path=None,
+                                         file_list=file_sample_list,
+                                         modality=mod,
+                                         loader=loader,
                                          detail_layer=0,
                                          static=True,
                                          keep_prior=False,
