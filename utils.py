@@ -395,7 +395,6 @@ def plot_color_composites(dataset_name, classes_to_plot=None, composites=None):
 # UTILS For H2Crop
 #-------------------------------------------------------
 
-
 def visualize_sample(dataset_dict, detail_layer=0, classes_to_drop=None, external_labels_dict=None):
     """
     Visualizer that respects all detail layers.
