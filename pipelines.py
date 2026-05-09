@@ -11,7 +11,7 @@ from sklearn.linear_model import SGDClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, ConfusionMatrixDisplay
 from utils import load_hyperspectral_dataset, normalize_features
-from H2Crop import H2Crop
+from H2Crop.H2Crop import H2Crop
 
 # cuML models
 from cuml.ensemble import RandomForestClassifier as cuRF
