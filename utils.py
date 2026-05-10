@@ -537,6 +537,7 @@ def plot_spectral_signatures_H2Crop(loader, file_list, modality, detail_layer=0,
 
     # Extract Valid Wavelengths
     if modality == "multispectral":
+        # Standard central wavelengths (nm) for the 10 Sentinel-2 bands
         wavelengths = np.array([490, 560, 665, 705, 740, 783, 842, 865, 1610, 2190])
     else:
         wavelength_list = []
