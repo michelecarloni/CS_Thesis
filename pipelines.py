@@ -7,22 +7,12 @@ from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import LinearSVC
-from sklearn.linear_model import SGDClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, ConfusionMatrixDisplay
 from utils import load_hyperspectral_dataset, normalize_features
-from H2Crop.H2Crop import H2Crop
 from H2Crop.data_structures import h2crop_taxonomy_dict
-
-# cuML models
-from cuml.ensemble import RandomForestClassifier as cuRF
-from cuml.linear_model import MBSGDClassifier as cuMBSGD
-from cuml.linear_model import LogisticRegression as cuLogReg
-from cuml.svm import LinearSVC as cuSVC
-from cuml.multiclass import OneVsRestClassifier
-
-import cupy as cp
-import math
+from hyperparameter_tuning import optimize_hyperparameters
+import json
 
 """
 Pipeline called for the first experiment (First Baseline):
@@ -175,12 +165,11 @@ def pipeline_standard_ml_algo(dataset_config_dict, save_dir, use_undersampling=F
 
 
 
-def pipeline_H2Crop_standard_ML_algo(save_results_dir, file_list, modality, loader=None, detail_layer=0, static=False, keep_prior=False, total_samples=100000, classes_to_drop=None):
+def pipeline_H2Crop_standard_ML_algo(save_results_dir, file_list, modality, class_action="drop", class_list=None, loader=None, detail_layer=0, static=False, keep_prior=False, total_samples=100000):
     """
     Modular pipeline to train and evaluate 4 baseline ML algorithms on H2Crop data.
-    Takes a pre-defined list of files and a specific modality to process.
+    Uses Optuna for hyperparameter optimization on a 20% validation split.
     """
-
     # Check Loader
     if not loader:
         print("Pipeline aborted: requiring loader")
@@ -188,11 +177,18 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, file_list, modality, load
 
     # Check Modality
     if modality.lower() not in ["hyperspectral", "multispectral"]:
-        print('Pipeline aborted: modality is neither "Hyperspectral" nor "Multispectral" ')
+        print('Pipeline aborted: modality is neither "Hyperspectral" nor "Multispectral"')
+        return
+
+    # Check Class Action
+    class_action = class_action.lower()
+    if class_action not in ["drop", "keep"]:
+        print('Pipeline aborted: class_action must be either "drop" or "keep"')
         return
 
     print(f"\n{'='*50}")
     print(f"STARTING PIPELINE FOR: {modality.upper()}")
+    print(f"Action: {class_action.upper()} classes {class_list}")
     print(f"Processing {len(file_list)} files...")
     print(f"{'='*50}")
 
@@ -208,18 +204,12 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, file_list, modality, load
         f.write(f"static: {static}\n")
         f.write(f"keep_prior: {keep_prior}\n")
         f.write(f"total_samples (balancing target): {total_samples}\n")
-        f.write(f"classes_to_drop: {classes_to_drop}\n")
+        f.write(f"class_action: {class_action}\n")
+        f.write(f"class_list: {class_list}\n")
+        f.write(f"split_ratio: 70% Train, 20% Val, 10% Test\n")
+        f.write(f"tuning: Optuna TPESampler\n")
         
     print(f"Configuration saved to {config_path}")
-    
-    # Scikit-learn CPU Models
-    ml_models = {
-        "decision_tree": DecisionTreeClassifier(random_state=42),
-        "random_forest": RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1),
-        # "logistic_regression": LogisticRegression(max_iter=2000, random_state=42),
-        "logistic_regression": LogisticRegression(max_iter=4000, solver='saga', C=0.1, random_state=42),
-        "linear_svm": LinearSVC(max_iter=2000, dual=False, random_state=42)
-    }
     
     print("Loading data...")
 
@@ -239,7 +229,7 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, file_list, modality, load
     print("Data loaded successfully!")
 
     # Preprocess and Flatten Pixels 
-    print("Flattening spatial grids into tabular (X, y) format...")
+    print("Flattening spatial grids into tabular (X, y) format and filtering classes...")
     X_list = []
     y_list = []
     
@@ -264,70 +254,112 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, file_list, modality, load
             prior_flat = prior_img.reshape(-1, 1)
             X_flat = np.hstack((X_flat, prior_flat))
             
-        # Filter before you stack
-        if classes_to_drop is not None:
-            valid_mask = ~np.isin(y_flat, classes_to_drop)
+        # Unified Filtering Logic (Applied before stacking to save RAM)
+        if class_list is not None:
+            if class_action == "keep":
+                valid_mask = np.isin(y_flat, class_list)
+            elif class_action == "drop":
+                valid_mask = ~np.isin(y_flat, class_list)
+                
             X_flat = X_flat[valid_mask]
             y_flat = y_flat[valid_mask]
 
-        X_list.append(X_flat)
-        y_list.append(y_flat)
+        # Only append if we actually have pixels left after filtering
+        if len(y_flat) > 0:
+            X_list.append(X_flat)
+            y_list.append(y_flat)
         
+    if not X_list:
+        print(f"Pipeline aborted: No pixels remained after applying the '{class_action}' filter for classes {class_list}.")
+        return
+
     X = np.vstack(X_list)
     y = np.concatenate(y_list)
-    
-    # Drop unecessary classes
-    X, y = loader.drop_classes(X, y, classes_to_drop=classes_to_drop)
 
-    print("DEBUG")
+    print(f"Total pixels extracted after filtering: {X.shape[0]}")
 
-    # extract a balance dataset
+    # Extract a balanced dataset
     X, y = loader.balance_pixels(X, y, total_samples=total_samples)
 
-    print("Splitting into Train/Test sets and scaling features...")
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+    # -------------------------------------------------------------
+    # 70/20/10 Train/Val/Test Split
+    # -------------------------------------------------------------
+    print("\nSplitting into Train (70%), Validation (20%), and Test (10%) sets...")
     
+    X_temp, X_test, y_temp, y_test = train_test_split(X, y, test_size=0.10, random_state=42, stratify=y)
+    X_train, X_val, y_train, y_val = train_test_split(X_temp, y_temp, test_size=(0.20 / 0.90), random_state=42, stratify=y_temp)
+    
+    print(f"  -> Train samples: {X_train.shape[0]}")
+    print(f"  -> Val samples:   {X_val.shape[0]}")
+    print(f"  -> Test samples:  {X_test.shape[0]}")
+    
+    # -------------------------------------------------------------
+    # Scaling
+    # -------------------------------------------------------------
+    print("\nScaling features...")
     scaler = StandardScaler()
     
-    # Scale Features (Keeping float32 to save RAM)
     X_train_scaled = scaler.fit_transform(X_train).astype(np.float32)
+    X_val_scaled = scaler.transform(X_val).astype(np.float32)
     X_test_scaled = scaler.transform(X_test).astype(np.float32)
     
-    # Cast Labels to int32: critical for classification algorithms
     y_train = y_train.astype(np.int32)
+    y_val = y_val.astype(np.int32)
     y_test = y_test.astype(np.int32)
 
-    # Train loop (Cleaned up for CPU Scikit-Learn)
-    for algo_name, model in ml_models.items():
-        print(f"\n--> Training {algo_name}...")
+    # -------------------------------------------------------------
+    # Model Tuning and Evaluation
+    # -------------------------------------------------------------
+    
+    # Define models to run and their respective Optuna trial budgets
+    models_to_run = {
+        "decision_tree": 30,
+        "random_forest": 30,
+        "logistic_regression": 20,
+        "linear_svm": 20
+    }
+
+    for algo_name, n_trials in models_to_run.items():
+        print(f"\n--> Tuning and Training {algo_name} with Optuna ({n_trials} trials)...")
         
-        # Train the model
-        model.fit(X_train_scaled, y_train)
+        # Optimize on val set and return the best model trained on X_train
+        best_model, best_params = optimize_hyperparameters(
+            model_name=algo_name,
+            X_train=X_train_scaled,
+            y_train=y_train,
+            X_val=X_val_scaled,
+            y_val=y_val,
+            n_trials=n_trials,
+            random_state=42
+        )
         
-        # Predict all at once (System RAM handles this efficiently)
-        y_pred = model.predict(X_test_scaled)
+        # Evaluate once on the held-out Test set
+        print(f"    Evaluating Best Model on Test Set...")
+        y_pred = best_model.predict(X_test_scaled)
         
         # -------------------------------------------------------------
-        # Save Classification Report & Confusion Matrix
+        # Save Classification Report, Best Params, & Confusion Matrix
         # -------------------------------------------------------------
         algo_dir = os.path.join(save_results_dir, modality, algo_name)
         os.makedirs(algo_dir, exist_ok=True)
         
-        # 1. Dynamically grab the right names for the current classes
         taxonomy_key = f'Taxonomy_{detail_layer}'
         current_taxonomy = h2crop_taxonomy_dict.get(taxonomy_key, {})
+        target_names = [current_taxonomy.get(c, f"Class {c}") for c in best_model.classes_]
         
-        # Map the IDs to strings. Fallback to "Class X" if something is missing.
-        target_names = [current_taxonomy.get(c, f"Class {c}") for c in model.classes_]
-        
-        # 2. Save Classification Report (.txt)
+        # Save Classification Report & Parameters (.txt)
         report_path = os.path.join(algo_dir, "performance.txt")
         report = classification_report(y_test, y_pred, zero_division=0, target_names=target_names)
-        with open(report_path, "w") as f:
-            f.write(report)
-        print(f"    Saved: {report_path}")
         
-        # 3. Save Confusion Matrix (.png)
+        with open(report_path, "w") as f:
+            f.write(f"--- Best Optuna Hyperparameters ---\n")
+            f.write(json.dumps(best_params, indent=4))
+            f.write(f"\n\n--- Test Set Classification Report ---\n")
+            f.write(report)
+            
+        print(f"    Saved Report & Params: {report_path}")
+        
+        # Save Confusion Matrix (.png)
         matrix_path = os.path.join(algo_dir, "confusion_matrix.png")
         
         fig_size = max(10, len(target_names) * 0.4)
@@ -342,18 +374,13 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, file_list, modality, load
             display_labels=target_names
         )
         
-        plt.title(f"Confusion Matrix: {algo_name} ({modality})")
+        plt.title(f"Confusion Matrix: {algo_name}\n({modality} | Tuned via Optuna)")
         plt.xticks(rotation=45, ha='right', fontsize=9)
         plt.yticks(fontsize=9)
         
         plt.tight_layout()
         plt.savefig(matrix_path, dpi=300)
         plt.close(fig)
-        print(f"    Saved: {matrix_path}")
+        print(f"    Saved Matrix: {matrix_path}")
         
     print(f"\nPipeline completed successfully! {modality.upper()} experiments saved.")
-
-
-
-
-
