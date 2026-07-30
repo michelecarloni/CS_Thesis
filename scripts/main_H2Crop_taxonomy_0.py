@@ -1,9 +1,10 @@
 from pipelines import pipeline_H2Crop_standard_ML_algo
-from H2Crop.H2Crop import H2Crop
+from H2Crop import H2Crop
 import os
 
 if __name__ == '__main__':
 
+    # Generate file_sample
     from_train = False
     limit = 300
     save_result_dir = 'results_2_H2Crop/baseline_layer_0_drop_0_3'
