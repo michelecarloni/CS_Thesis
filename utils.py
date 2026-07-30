@@ -676,3 +676,14 @@ def plot_spectral_signatures_H2Crop(loader, file_list, modality, detail_layer=0,
     
     plt.tight_layout()
     plt.show()
+
+
+
+
+# Read file_sample
+# Read File
+def read_file_sample(file_sample_path):
+    
+    with open(file_sample_path, "r") as f:
+        file_list = f.read().splitlines()
+        return file_list

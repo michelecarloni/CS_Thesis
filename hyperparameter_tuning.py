@@ -51,10 +51,9 @@ def optimize_hyperparameters(model_name, X_train, y_train, X_val, y_val, n_trial
         elif model_name == "logistic_regression":
             params = {
                 'C': trial.suggest_float('C', 1e-3, 1e2, log=True),
-                'solver': 'saga',
-                'max_iter': 2000,
-                'random_state': random_state,
-                'n_jobs': -1
+                'solver': 'lbfgs',
+                'max_iter': 4000,
+                'random_state': random_state
             }
             model = LogisticRegression(**params)
 
@@ -90,4 +89,4 @@ def _build_model(model_name, params, random_state):
     elif model_name == "linear_svm":
         return LinearSVC(**params, dual=False, max_iter=2000, random_state=random_state)
     elif model_name == "logistic_regression":
-        return LogisticRegression(**params, solver='saga', max_iter=2000, random_state=random_state, n_jobs=-1)
+        return LogisticRegression(**params, solver='lbfgs', max_iter=4000, random_state=random_state)
