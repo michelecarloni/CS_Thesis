@@ -36,9 +36,9 @@ if __name__ == "__main__":
 
     # Pair paths with their respective class lists
     experiments = [
-        (sub_1_path, sub_1),
-        (sub_2_path, sub_2),
         (sub_3_path, sub_3),
+        (sub_2_path, sub_2),
+        (sub_1_path, sub_1),
         (sub_4_path, sub_4)
     ]
 
@@ -64,6 +64,6 @@ if __name__ == "__main__":
                 loader=loader,
                 detail_layer=3,            
                 static=True,
-                keep_prior=False,
-                total_samples=150000       
+                samples_per_class=50000,
+                allow_resample=True     
             )

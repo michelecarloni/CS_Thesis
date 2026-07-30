@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.subplots as plt_subplots
 import seaborn as sns
 from sklearn.model_selection import train_test_split
 from sklearn.tree import DecisionTreeClassifier
@@ -165,153 +166,201 @@ def pipeline_standard_ml_algo(dataset_config_dict, save_dir, use_undersampling=F
 
 
 
-def pipeline_H2Crop_standard_ML_algo(save_results_dir, file_list, modality, class_action="drop", class_list=None, loader=None, detail_layer=0, static=False, keep_prior=False, total_samples=100000):
+def pipeline_H2Crop_standard_ML_algo(save_results_dir, file_list, modality, class_action="drop", class_list=None, loader=None, detail_layer=0, static=False, keep_prior=False, samples_per_class=25000, allow_resample=True):
     """
     Modular pipeline to train and evaluate 4 baseline ML algorithms on H2Crop data.
-    Uses Optuna for hyperparameter optimization on a 20% validation split.
+    Uses a dynamic file queue to guarantee a specific number of samples per class.
+    Includes Optuna for hyperparameter optimization on a 20% validation split.
     """
-    # Check Loader
     if not loader:
         print("Pipeline aborted: requiring loader")
         return
 
-    # Check Modality
     if modality.lower() not in ["hyperspectral", "multispectral"]:
         print('Pipeline aborted: modality is neither "Hyperspectral" nor "Multispectral"')
         return
 
-    # Check Class Action
     class_action = class_action.lower()
     if class_action not in ["drop", "keep"]:
         print('Pipeline aborted: class_action must be either "drop" or "keep"')
         return
 
-    print(f"\n{'='*50}")
-    print(f"STARTING PIPELINE FOR: {modality.upper()}")
+    print(f"\n{'='*60}")
+    print(f"STARTING DYNAMIC PIPELINE FOR: {modality.upper()}")
     print(f"Action: {class_action.upper()} classes {class_list}")
-    print(f"Processing {len(file_list)} files...")
-    print(f"{'='*50}")
+    print(f"Target: {samples_per_class} samples per class")
+    print(f"{'='*60}")
 
     # Directories setup
     os.makedirs(os.path.join(save_results_dir, modality), exist_ok=True)
     config_path = os.path.join(save_results_dir, modality, "configuration.txt")
     
     with open(config_path, "w") as f:
-        f.write("--- H2Crop ML Pipeline Configuration ---\n")
+        f.write("--- H2Crop ML Dynamic Pipeline Configuration ---\n")
         f.write(f"modality: {modality}\n")
-        f.write(f"num_files_processed: {len(file_list)}\n")
         f.write(f"detail_layer: {detail_layer}\n")
         f.write(f"static: {static}\n")
         f.write(f"keep_prior: {keep_prior}\n")
-        f.write(f"total_samples (balancing target): {total_samples}\n")
+        f.write(f"samples_per_class: {samples_per_class}\n")
+        f.write(f"allow_resample: {allow_resample}\n")
         f.write(f"class_action: {class_action}\n")
         f.write(f"class_list: {class_list}\n")
-        f.write(f"split_ratio: 70% Train, 20% Val, 10% Test\n")
         f.write(f"tuning: Optuna TPESampler\n")
         
     print(f"Configuration saved to {config_path}")
     
-    print("Loading data...")
-
-    # Load the data using the explicitly provided file list and modality
-    batch = loader.load_h5_data(
-        file_list=file_list, 
-        detail_layer=detail_layer, 
-        static=static, 
-        data_type=modality, 
-        keep_prior=keep_prior
-    )
-
-    if not batch:
-        print(f"Pipeline aborted: No data loaded for {modality}.")
-        return
-
-    print("Data loaded successfully!")
-
-    # Preprocess and Flatten Pixels 
-    print("Flattening spatial grids into tabular (X, y) format and filtering classes...")
-    X_list = []
-    y_list = []
+    # -------------------------------------------------------------
+    # Dynamic Queue and Resampling Logic
+    # -------------------------------------------------------------
+    master_queue = list(file_list)
+    used_files = set(file_list)
     
-    for sample in batch:
-        X_img = sample[modality]
-        y_img = sample['labels']
+    if allow_resample:
+        print("\n[Resampling Enabled] Fetching global file list to act as buffer...")
+        # Grab a large limit to ensure we have access to the whole dataset if needed
+        all_possible_files = loader.get_file_list(from_train=False, limit=999999) 
+        additional_files = [f for f in all_possible_files if f not in used_files]
         
-        # Upsample hyperspectral from 64x64 to 192x192
-        if modality == "hyperspectral":
-            X_img = loader.upsample_hyperspectral(X_img)
+        # Shuffle to ensure we aren't pulling geographically biased sequential files
+        np.random.seed(42) 
+        np.random.shuffle(additional_files)
+        master_queue.extend(additional_files)
+        print(f"Buffer populated. Total available files in queue: {len(master_queue)}")
+
+    # Dictionary to collect X matrices per class: {class_id: [X_array1, X_array2, ...]}
+    collected_X = {}
+    target_classes = set(class_list) if (class_action == "keep" and class_list is not None) else None
+    
+    chunk_size = 50  # Load 50 files at a time to prevent RAM overload
+    files_processed = 0
+
+    print("\nStarting dynamic pixel extraction...")
+    
+    while master_queue:
+        # Pop the next chunk of files
+        batch_files = master_queue[:chunk_size]
+        master_queue = master_queue[chunk_size:]
+        files_processed += len(batch_files)
+        
+        batch = loader.load_h5_data(
+            file_list=batch_files, 
+            detail_layer=detail_layer, 
+            static=static, 
+            data_type=modality, 
+            keep_prior=keep_prior
+        )
+        
+        if not batch:
+            continue
             
-        # Transpose necessary for stacking together
-        X_img = np.transpose(X_img, (1, 2, 0))
-        
-        # Flatten to tabular format (Pixels, Channels)
-        X_flat = X_img.reshape(-1, X_img.shape[-1])
-        y_flat = y_img.reshape(-1)
-        
-        # Handle Priors if requested
-        if keep_prior and 'prior' in sample:
-            prior_img = sample['prior']
-            prior_flat = prior_img.reshape(-1, 1)
-            X_flat = np.hstack((X_flat, prior_flat))
+        for sample in batch:
+            X_img = sample[modality]
+            y_img = sample['labels']
             
-        # Unified Filtering Logic (Applied before stacking to save RAM)
-        if class_list is not None:
-            if class_action == "keep":
-                valid_mask = np.isin(y_flat, class_list)
-            elif class_action == "drop":
-                valid_mask = ~np.isin(y_flat, class_list)
+            if modality == "hyperspectral":
+                X_img = loader.upsample_hyperspectral(X_img)
                 
-            X_flat = X_flat[valid_mask]
-            y_flat = y_flat[valid_mask]
+            X_img = np.transpose(X_img, (1, 2, 0))
+            X_flat = X_img.reshape(-1, X_img.shape[-1])
+            y_flat = y_img.reshape(-1)
+            
+            if keep_prior and 'prior' in sample:
+                prior_flat = sample['prior'].reshape(-1, 1)
+                X_flat = np.hstack((X_flat, prior_flat))
+                
+            # Filter classes
+            if class_list is not None:
+                if class_action == "keep":
+                    valid_mask = np.isin(y_flat, class_list)
+                elif class_action == "drop":
+                    valid_mask = ~np.isin(y_flat, class_list)
+                    
+                X_flat = X_flat[valid_mask]
+                y_flat = y_flat[valid_mask]
 
-        # Only append if we actually have pixels left after filtering
-        if len(y_flat) > 0:
-            X_list.append(X_flat)
-            y_list.append(y_flat)
-        
-    if not X_list:
-        print(f"Pipeline aborted: No pixels remained after applying the '{class_action}' filter for classes {class_list}.")
-        return
+            if len(y_flat) == 0:
+                continue
+                
+            # Distribute pixels to their respective class bins
+            for class_id in np.unique(y_flat):
+                mask = (y_flat == class_id)
+                if class_id not in collected_X:
+                    collected_X[class_id] = []
+                collected_X[class_id].append(X_flat[mask])
+                
+        # --- Check if target samples_per_class is reached ---
+        if target_classes:
+            done = True
+            for c in target_classes:
+                count = sum(len(arr) for arr in collected_X.get(c, []))
+                if count < samples_per_class:
+                    done = False
+                    break
+            if done:
+                print(f"\n--> Success! Target of {samples_per_class} samples reached for all target classes.")
+                break
+        else:
+            # If action is 'drop', check if all discovered classes hit the target
+            if len(collected_X) > 0:
+                done = True
+                for c, arrs in collected_X.items():
+                    if sum(len(arr) for arr in arrs) < samples_per_class:
+                        done = False
+                        break
+                if done:
+                    print(f"\n--> Success! Target of {samples_per_class} samples reached for all discovered classes.")
+                    break
 
-    X = np.vstack(X_list)
-    y = np.concatenate(y_list)
-
-    print(f"Total pixels extracted after filtering: {X.shape[0]}")
-
-    # Extract a balanced dataset
-    X, y = loader.balance_pixels(X, y, total_samples=total_samples)
+    print(f"Total files read to satisfy targets: {files_processed}")
 
     # -------------------------------------------------------------
-    # 70/20/10 Train/Val/Test Split
+    # Truncating & Balancing Phase
+    # -------------------------------------------------------------
+    X_final_list = []
+    y_final_list = []
+    
+    print(f"\n--- Final Class Distribution (Target: {samples_per_class}) ---")
+    for class_id, arrs in collected_X.items():
+        X_c = np.vstack(arrs)
+        total_found = len(X_c)
+        
+        if total_found > samples_per_class:
+            # Randomly undersample to the exact target
+            idx = np.random.choice(total_found, samples_per_class, replace=False)
+            X_c = X_c[idx]
+            print(f" - Class {class_id}: Found {total_found} -> Downsampled to {samples_per_class}")
+        else:
+            print(f" - Class {class_id}: Found {total_found} -> Kept {total_found} (WARNING: Under target!)")
+            
+        X_final_list.append(X_c)
+        y_final_list.append(np.full(len(X_c), class_id, dtype=np.int32))
+        
+    if not X_final_list:
+        print("Pipeline aborted: No valid pixels extracted.")
+        return
+        
+    X = np.vstack(X_final_list)
+    y = np.concatenate(y_final_list)
+
+    print(f"\nTotal pixels extracted after balancing: {X.shape[0]}")
+
+    # -------------------------------------------------------------
+    # 70/20/10 Train/Val/Test Split & Scaling
     # -------------------------------------------------------------
     print("\nSplitting into Train (70%), Validation (20%), and Test (10%) sets...")
     
     X_temp, X_test, y_temp, y_test = train_test_split(X, y, test_size=0.10, random_state=42, stratify=y)
     X_train, X_val, y_train, y_val = train_test_split(X_temp, y_temp, test_size=(0.20 / 0.90), random_state=42, stratify=y_temp)
     
-    print(f"  -> Train samples: {X_train.shape[0]}")
-    print(f"  -> Val samples:   {X_val.shape[0]}")
-    print(f"  -> Test samples:  {X_test.shape[0]}")
-    
-    # -------------------------------------------------------------
-    # Scaling
-    # -------------------------------------------------------------
     print("\nScaling features...")
     scaler = StandardScaler()
-    
     X_train_scaled = scaler.fit_transform(X_train).astype(np.float32)
     X_val_scaled = scaler.transform(X_val).astype(np.float32)
     X_test_scaled = scaler.transform(X_test).astype(np.float32)
-    
-    y_train = y_train.astype(np.int32)
-    y_val = y_val.astype(np.int32)
-    y_test = y_test.astype(np.int32)
 
     # -------------------------------------------------------------
     # Model Tuning and Evaluation
     # -------------------------------------------------------------
-    
-    # Define models to run and their respective Optuna trial budgets
     models_to_run = {
         "decision_tree": 30,
         "random_forest": 30,
@@ -322,7 +371,6 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, file_list, modality, clas
     for algo_name, n_trials in models_to_run.items():
         print(f"\n--> Tuning and Training {algo_name} with Optuna ({n_trials} trials)...")
         
-        # Optimize on val set and return the best model trained on X_train
         best_model, best_params = optimize_hyperparameters(
             model_name=algo_name,
             X_train=X_train_scaled,
@@ -333,13 +381,9 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, file_list, modality, clas
             random_state=42
         )
         
-        # Evaluate once on the held-out Test set
         print(f"    Evaluating Best Model on Test Set...")
         y_pred = best_model.predict(X_test_scaled)
         
-        # -------------------------------------------------------------
-        # Save Classification Report, Best Params, & Confusion Matrix
-        # -------------------------------------------------------------
         algo_dir = os.path.join(save_results_dir, modality, algo_name)
         os.makedirs(algo_dir, exist_ok=True)
         
@@ -347,7 +391,7 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, file_list, modality, clas
         current_taxonomy = h2crop_taxonomy_dict.get(taxonomy_key, {})
         target_names = [current_taxonomy.get(c, f"Class {c}") for c in best_model.classes_]
         
-        # Save Classification Report & Parameters (.txt)
+        # Save Classification Report & Parameters
         report_path = os.path.join(algo_dir, "performance.txt")
         report = classification_report(y_test, y_pred, zero_division=0, target_names=target_names)
         
@@ -359,28 +403,22 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, file_list, modality, clas
             
         print(f"    Saved Report & Params: {report_path}")
         
-        # Save Confusion Matrix (.png)
+        # Save Confusion Matrix
         matrix_path = os.path.join(algo_dir, "confusion_matrix.png")
-        
         fig_size = max(10, len(target_names) * 0.4)
-        fig, ax = plt.subplots(figsize=(fig_size, fig_size * 0.8))
+        fig, ax = plt_subplots.subplots(figsize=(fig_size, fig_size * 0.8))
         
         ConfusionMatrixDisplay.from_predictions(
-            y_test, 
-            y_pred, 
-            ax=ax, 
-            cmap='Blues', 
-            colorbar=False,
-            display_labels=target_names
+            y_test, y_pred, ax=ax, cmap='Blues', colorbar=False, display_labels=target_names
         )
         
         plt.title(f"Confusion Matrix: {algo_name}\n({modality} | Tuned via Optuna)")
         plt.xticks(rotation=45, ha='right', fontsize=9)
         plt.yticks(fontsize=9)
-        
         plt.tight_layout()
         plt.savefig(matrix_path, dpi=300)
         plt.close(fig)
+        
         print(f"    Saved Matrix: {matrix_path}")
         
     print(f"\nPipeline completed successfully! {modality.upper()} experiments saved.")
