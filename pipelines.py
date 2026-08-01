@@ -17,10 +17,6 @@ from H2Crop.data_structures import h2crop_taxonomy_dict
 from hyperparameter_tuning import optimize_hyperparameters
 from contextlib import redirect_stdout
 
-from cuml.ensemble import RandomForestClassifier as cuRF
-from cuml.linear_model import LogisticRegression as cuLogReg
-from cuml.svm import LinearSVC as cuSVC
-
 import cupy as cp
 
 """
