@@ -268,7 +268,8 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, data_path, modality, deta
             X_val=X_val_scaled,
             y_val=y_val,
             n_trials=n_trials,
-            random_state=42
+            random_state=42,
+            use_gpu=use_gpu
         )
         
         print(f"    Evaluating Best Model on Test Set...")

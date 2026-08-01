@@ -77,5 +77,6 @@ if __name__ == "__main__":
                 save_results_dir=save_dir, 
                 data_path=data_path,       
                 modality=mod,
-                detail_layer=3,            
+                detail_layer=3,       
+                use_gpu=False,     
             )
