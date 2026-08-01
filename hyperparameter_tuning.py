@@ -1,26 +1,24 @@
 import optuna
 import warnings
 
-# Scikit-Learn (CPU Models)
+# Scikit-Learn (CPU Models - Kept only for Decision Tree)
 from sklearn.tree import DecisionTreeClassifier
-from sklearn.svm import LinearSVC as skSVC
-from sklearn.linear_model import LogisticRegression as skLogReg
 
 # NVIDIA RAPIDS cuML (GPU Models)
 try:
     from cuml.ensemble import RandomForestClassifier as cuRF
+    # Import the Mini-Batch SGD Classifier which is safe for 8GB VRAM
+    from cuml.linear_model import MBSGDClassifier as cuMBSGD
     from cuml.svm import LinearSVC as cuSVC
-    from cuml.linear_model import LogisticRegression as cuLogReg
 except ImportError:
-    pass # Fails gracefully if cuML isn't installed locally
+    pass
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 def optimize_hyperparameters(model_name, X_train, y_train, X_val, y_val, n_trials=20, random_state=42, use_gpu=True):
     """
-    Unified Optuna tuner utilizing CPU and GPU processing dynamically.
-    use_gpu=True by default. 
-    Decision Tree is ALWAYS CPU. Random Forest is ALWAYS GPU.
+    Unified Optuna tuner optimized for local 8GB VRAM (RTX 4060).
+    Decision Tree is ALWAYS CPU. Random Forest, SVM, and LogReg are ALWAYS GPU.
     """
     def objective(trial):
         # --- 1. Decision Tree (Always CPU) ---
@@ -45,39 +43,29 @@ def optimize_hyperparameters(model_name, X_train, y_train, X_val, y_val, n_trial
             }
             model = cuRF(**params)
 
-        # --- 3. Linear SVM (GPU or CPU) ---
+        # --- 3. Linear SVM (GPU via Mini-Batch SGD for Memory Safety) ---
         elif model_name == "linear_svm":
-            if use_gpu:
-                params = {
-                    'C': trial.suggest_float('C', 1e-4, 1e2, log=True),
-                    'max_iter': 5000
-                }
-                model = cuSVC(**params)
-            else:
-                params = {
-                    'C': trial.suggest_float('C', 1e-4, 1e2, log=True),
-                    'max_iter': 5000,
-                    'random_state': random_state
-                }
-                model = skSVC(**params)
+            params = {
+                'loss': 'hinge', # 'hinge' loss mathematically equates to a Linear SVM
+                'penalty': 'l2',
+                'alpha': trial.suggest_float('alpha', 1e-5, 1e-1, log=True),
+                'batch_size': 2048, # Process 2048 rows at a time to prevent VRAM spikes
+                'epochs': 100,
+                'learning_rate': 'adaptive'
+            }
+            model = cuMBSGD(**params)
 
-        # --- 4. Logistic Regression (GPU or CPU) ---
+        # --- 4. Logistic Regression (GPU via Mini-Batch SGD for Memory Safety) ---
         elif model_name == "logistic_regression":
-            if use_gpu:
-                params = {
-                    'C': trial.suggest_float('C', 1e-3, 1e2, log=True),
-                    'max_iter': 5000
-                }
-                model = cuLogReg(**params)
-            else:
-                params = {
-                    'C': trial.suggest_float('C', 1e-3, 1e2, log=True),
-                    'solver': 'saga',
-                    'max_iter': 5000,
-                    'n_jobs': -1,
-                    'random_state': random_state
-                }
-                model = skLogReg(**params)
+            params = {
+                'loss': 'log', # 'log' loss mathematically equates to Logistic Regression
+                'penalty': 'l2',
+                'alpha': trial.suggest_float('alpha', 1e-5, 1e-1, log=True),
+                'batch_size': 2048, # Process 2048 rows at a time to prevent VRAM spikes
+                'epochs': 100,
+                'learning_rate': 'adaptive'
+            }
+            model = cuMBSGD(**params)
 
         else:
             raise ValueError(f"Unknown model_name: '{model_name}'")
@@ -97,7 +85,7 @@ def optimize_hyperparameters(model_name, X_train, y_train, X_val, y_val, n_trial
     print(f"    [Optuna] Best Params: {study.best_params}")
 
     best_params = study.best_params
-    best_model = _build_model(model_name, best_params, random_state, use_gpu)
+    best_model = _build_model(model_name, best_params, random_state)
     
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -105,8 +93,8 @@ def optimize_hyperparameters(model_name, X_train, y_train, X_val, y_val, n_trial
 
     return best_model, best_params
 
-def _build_model(model_name, params, random_state, use_gpu):
-    """Internal helper to instantiate a model from best parameters dynamically."""
+def _build_model(model_name, params, random_state):
+    """Internal helper to instantiate a model from best parameters."""
     if model_name == "decision_tree":
         return DecisionTreeClassifier(**params, random_state=random_state)
         
@@ -114,13 +102,7 @@ def _build_model(model_name, params, random_state, use_gpu):
         return cuRF(**params, random_state=random_state)
         
     elif model_name == "linear_svm":
-        if use_gpu:
-            return cuSVC(**params, max_iter=5000)
-        else:
-            return skSVC(**params, random_state=random_state, max_iter=5000)
+        return cuMBSGD(**params)
         
     elif model_name == "logistic_regression":
-        if use_gpu:
-            return cuLogReg(**params)
-        else:
-            return skLogReg(**params, random_state=random_state, n_jobs=-1)
+        return cuMBSGD(**params)
