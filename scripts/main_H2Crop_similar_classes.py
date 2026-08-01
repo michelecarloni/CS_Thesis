@@ -64,7 +64,7 @@ if __name__ == "__main__":
                 detail_layer=3,
                 static=True,
                 keep_prior=False,
-                samples_per_class=50000
+                samples_per_class=30000
             )
             
             # Check if extraction was successful
@@ -78,5 +78,5 @@ if __name__ == "__main__":
                 data_path=data_path,       
                 modality=mod,
                 detail_layer=3,       
-                use_gpu=False,     
+                use_gpu=True,     
             )

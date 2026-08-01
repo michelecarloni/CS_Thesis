@@ -9,7 +9,8 @@ try:
     from cuml.ensemble import RandomForestClassifier as cuRF
     # Import the Mini-Batch SGD Classifier which is safe for 8GB VRAM
     from cuml.linear_model import MBSGDClassifier as cuMBSGD
-    from cuml.svm import LinearSVC as cuSVC
+    # Import the GPU-accelerated One-vs-Rest wrapper for multiclass
+    from cuml.multiclass import OneVsRestClassifier as cuOvR
 except ImportError:
     pass
 
@@ -43,29 +44,31 @@ def optimize_hyperparameters(model_name, X_train, y_train, X_val, y_val, n_trial
             }
             model = cuRF(**params)
 
-        # --- 3. Linear SVM (GPU via Mini-Batch SGD for Memory Safety) ---
+        # --- 3. Linear SVM (GPU via Mini-Batch SGD wrapped in OvR) ---
         elif model_name == "linear_svm":
             params = {
-                'loss': 'hinge', # 'hinge' loss mathematically equates to a Linear SVM
+                'loss': 'hinge', 
                 'penalty': 'l2',
                 'alpha': trial.suggest_float('alpha', 1e-5, 1e-1, log=True),
-                'batch_size': 2048, # Process 2048 rows at a time to prevent VRAM spikes
+                'batch_size': 2048,
                 'epochs': 100,
                 'learning_rate': 'adaptive'
             }
-            model = cuMBSGD(**params)
+            base_model = cuMBSGD(**params)
+            model = cuOvR(estimator=base_model)
 
-        # --- 4. Logistic Regression (GPU via Mini-Batch SGD for Memory Safety) ---
+        # --- 4. Logistic Regression (GPU via Mini-Batch SGD wrapped in OvR) ---
         elif model_name == "logistic_regression":
             params = {
-                'loss': 'log', # 'log' loss mathematically equates to Logistic Regression
+                'loss': 'log', 
                 'penalty': 'l2',
                 'alpha': trial.suggest_float('alpha', 1e-5, 1e-1, log=True),
-                'batch_size': 2048, # Process 2048 rows at a time to prevent VRAM spikes
+                'batch_size': 2048, 
                 'epochs': 100,
                 'learning_rate': 'adaptive'
             }
-            model = cuMBSGD(**params)
+            base_model = cuMBSGD(**params)
+            model = cuOvR(estimator=base_model)
 
         else:
             raise ValueError(f"Unknown model_name: '{model_name}'")
@@ -93,6 +96,7 @@ def optimize_hyperparameters(model_name, X_train, y_train, X_val, y_val, n_trial
 
     return best_model, best_params
 
+
 def _build_model(model_name, params, random_state):
     """Internal helper to instantiate a model from best parameters."""
     if model_name == "decision_tree":
@@ -102,7 +106,7 @@ def _build_model(model_name, params, random_state):
         return cuRF(**params, random_state=random_state)
         
     elif model_name == "linear_svm":
-        return cuMBSGD(**params)
+        return cuOvR(estimator=cuMBSGD(**params))
         
     elif model_name == "logistic_regression":
-        return cuMBSGD(**params)
+        return cuOvR(estimator=cuMBSGD(**params))
