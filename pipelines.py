@@ -177,8 +177,7 @@ def pipeline_standard_ml_algo(dataset_config_dict, save_dir, use_undersampling=F
 def pipeline_H2Crop_standard_ML_algo(save_results_dir, data_path, modality, detail_layer=0, use_gpu=True):
     """
     Modular pipeline to train and evaluate baseline ML algorithms on H2Crop data.
-    Loads pre-extracted .npz arrays to bypass redundant I/O operations.
-    Includes Optuna for hyperparameter optimization and optional GPU support.
+    Loads pre-extracted .npz arrays and securely manages GPU VRAM pools.
     """
     
     if not os.path.exists(data_path):
@@ -190,15 +189,12 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, data_path, modality, deta
     print(f"Loading data from: {data_path}")
     print(f"{'='*60}")
 
-    # Directories setup
     os.makedirs(os.path.join(save_results_dir, modality), exist_ok=True)
     
     # -------------------------------------------------------------
     # 1. Load Pre-Extracted Data
     # -------------------------------------------------------------
     print("Loading pre-extracted arrays into memory...")
-    
-    # Use context manager to ensure the file is properly closed after reading
     with np.load(data_path) as data:
         X = data['X']
         y = data['y']
@@ -213,7 +209,6 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, data_path, modality, deta
     X_temp, X_test, y_temp, y_test = train_test_split(X, y, test_size=0.10, random_state=42, stratify=y)
     X_train, X_val, y_train, y_val = train_test_split(X_temp, y_temp, test_size=(0.20 / 0.90), random_state=42, stratify=y_temp)
     
-    # Free up the unscaled master matrices
     del X, y, X_temp, y_temp
     gc.collect()
     
@@ -226,7 +221,6 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, data_path, modality, deta
     X_val_scaled = scaler.transform(X_val).astype(np.float32)
     X_test_scaled = scaler.transform(X_test).astype(np.float32)
     
-    # Ensure labels are explicitly 32-bit integers for Scikit-Learn
     y_train = y_train.astype(np.int32)
     y_val = y_val.astype(np.int32)
     y_test = y_test.astype(np.int32)
@@ -234,7 +228,6 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, data_path, modality, deta
     del X_train, X_val, X_test
     gc.collect()
 
-    # Save Pipeline Configuration
     config_path = os.path.join(save_results_dir, modality, "configuration.txt")
     with open(config_path, "w") as f:
         f.write("--- H2Crop ML Pipeline Configuration ---\n")
@@ -245,8 +238,6 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, data_path, modality, deta
         f.write(f"use_gpu: {use_gpu}\n")
         f.write(f"tuning: Optuna TPESampler\n")
         
-    print(f"Configuration saved to {config_path}")
-
     # -------------------------------------------------------------
     # 4. Model Tuning and Evaluation
     # -------------------------------------------------------------
@@ -259,17 +250,17 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, data_path, modality, deta
 
     for algo_name, n_trials in models_to_run.items():
         print(f"\n--> Tuning and Training {algo_name} with Optuna ({n_trials} trials)...")
-
-        # GPU VRAM CLEANUP
-        # Clear CuPy cache & system RAM before starting a new model
+        
+        # *** GPU VRAM CLEANUP ***
         gc.collect()
         try:
-            cp.get_default_memory_pool().free_all_blocks()
-            cp.get_default_pinned_memory_pool().free_all_blocks()
+            mempool = cp.get_default_memory_pool()
+            pinned_mempool = cp.get_default_pinned_memory_pool()
+            mempool.free_all_blocks() 
+            pinned_mempool.free_all_blocks() 
         except Exception:
             pass
         
-        # Optimize on Val set and return the best model trained on X_train
         best_model, best_params = optimize_hyperparameters(
             model_name=algo_name,
             X_train=X_train_scaled,
@@ -280,19 +271,16 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, data_path, modality, deta
             random_state=42
         )
         
-        # Evaluate ONCE on the held-out Test set
         print(f"    Evaluating Best Model on Test Set...")
         y_pred = best_model.predict(X_test_scaled)
         
         algo_dir = os.path.join(save_results_dir, modality, algo_name)
         os.makedirs(algo_dir, exist_ok=True)
         
-        # Grab class names from taxonomy
         taxonomy_key = f'Taxonomy_{detail_layer}'
         current_taxonomy = h2crop_taxonomy_dict.get(taxonomy_key, {})
         target_names = [current_taxonomy.get(c, f"Class {c}") for c in best_model.classes_]
         
-        # Save Classification Report & Parameters
         report_path = os.path.join(algo_dir, "performance.txt")
         report = classification_report(y_test, y_pred, zero_division=0, target_names=target_names)
         
@@ -302,9 +290,6 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, data_path, modality, deta
             f.write(f"\n\n--- Test Set Classification Report ---\n")
             f.write(report)
             
-        print(f"    Saved Report & Params: {report_path}")
-        
-        # Save Confusion Matrix
         matrix_path = os.path.join(algo_dir, "confusion_matrix.png")
         fig_size = max(10, len(target_names) * 0.4)
         fig, ax = plt.subplots(figsize=(fig_size, fig_size * 0.8))
@@ -319,7 +304,5 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, data_path, modality, deta
         plt.tight_layout()
         plt.savefig(matrix_path, dpi=300)
         plt.close(fig)
-        
-        print(f"    Saved Matrix: {matrix_path}")
         
     print(f"\nPipeline completed successfully for {modality.upper()}!")
