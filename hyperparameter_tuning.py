@@ -1,20 +1,24 @@
 import optuna
-from sklearn.tree import DecisionTreeClassifier
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import LogisticRegression
-from sklearn.svm import LinearSVC
 
-# Silence verbose Optuna logging (optional, keeps console output clean)
+# Import standard Scikit-Learn for the fast CPU Decision Tree
+from sklearn.tree import DecisionTreeClassifier
+
+# Import NVIDIA RAPIDS (cuML) for GPU-accelerated algorithms
+from cuml.ensemble import RandomForestClassifier as cuRF
+from cuml.linear_model import LogisticRegression as cuLogReg
+from cuml.svm import LinearSVC as cuSVC
+
+# Silence verbose Optuna logging 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 def optimize_hyperparameters(model_name, X_train, y_train, X_val, y_val, n_trials=20, random_state=42):
     """
-    Unified Optuna tuner for standard ML models.
+    Unified Optuna tuner utilizing NVIDIA RAPIDS (cuML) for GPU acceleration.
     Returns the best fitted model trained on X_train.
     """
     
     def objective(trial):
-        # --- 1. Decision Tree ---
+        # --- 1. Decision Tree (Remains on CPU - Extremely Fast Anyway) ---
         if model_name == "decision_tree":
             params = {
                 'criterion': trial.suggest_categorical('criterion', ['gini', 'entropy']),
@@ -25,42 +29,41 @@ def optimize_hyperparameters(model_name, X_train, y_train, X_val, y_val, n_trial
             }
             model = DecisionTreeClassifier(**params)
 
-        # --- 2. Random Forest ---
+        # --- 2. Random Forest (GPU Accelerated) ---
         elif model_name == "random_forest":
             params = {
                 'n_estimators': trial.suggest_int('n_estimators', 50, 250, step=50),
                 'max_depth': trial.suggest_int('max_depth', 5, 30),
-                'min_samples_split': trial.suggest_int('min_samples_split', 2, 10),
-                'max_features': trial.suggest_categorical('max_features', ['sqrt', 'log2', None]),
-                'random_state': random_state,
-                'n_jobs': -1
+                # Note: cuML RF doesn't take min_samples_split in the exact same format, it relies on max_depth and min_samples_leaf
+                'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 10),
+                'max_features': trial.suggest_categorical('max_features', ['sqrt', 'log2', 1.0]),
+                'random_state': random_state
             }
-            model = RandomForestClassifier(**params)
+            model = cuRF(**params)
 
-        # --- 3. Linear SVC ---
+        # --- 3. Linear SVC (GPU Accelerated) ---
         elif model_name == "linear_svm":
             params = {
                 'C': trial.suggest_float('C', 1e-4, 1e2, log=True),
-                'dual': False,
-                'max_iter': 2000,
-                'random_state': random_state
+                'max_iter': 2000
+                # cuML SVC runs natively on CUDA
             }
-            model = LinearSVC(**params)
+            model = cuSVC(**params)
 
-        # --- 4. Logistic Regression ---
+        # --- 4. Logistic Regression (GPU Accelerated) ---
         elif model_name == "logistic_regression":
             params = {
                 'C': trial.suggest_float('C', 1e-3, 1e2, log=True),
-                'solver': 'lbfgs',
-                'max_iter': 4000,
-                'random_state': random_state
+                'max_iter': 4000
+                # cuML automatically uses optimal GPU solvers (QN / L-BFGS)
             }
-            model = LogisticRegression(**params)
+            model = cuLogReg(**params)
 
         else:
             raise ValueError(f"Unknown model_name: '{model_name}'")
 
         # Fit on Training Set & Evaluate on Validation Set
+        # cuML expects float32/float64 inputs, which your pipeline already handles!
         model.fit(X_train, y_train)
         return model.score(X_val, y_val)
 
@@ -84,9 +87,12 @@ def _build_model(model_name, params, random_state):
     """Internal helper to instantiate a model from best parameters."""
     if model_name == "decision_tree":
         return DecisionTreeClassifier(**params, random_state=random_state)
+        
     elif model_name == "random_forest":
-        return RandomForestClassifier(**params, random_state=random_state, n_jobs=-1)
+        return cuRF(**params, random_state=random_state)
+        
     elif model_name == "linear_svm":
-        return LinearSVC(**params, dual=False, max_iter=2000, random_state=random_state)
+        return cuSVC(**params, max_iter=2000)
+        
     elif model_name == "logistic_regression":
-        return LogisticRegression(**params, solver='lbfgs', max_iter=4000, random_state=random_state)
+        return cuLogReg(**params, max_iter=4000)
