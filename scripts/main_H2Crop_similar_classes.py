@@ -75,7 +75,7 @@ if __name__ == "__main__":
             # 2. Run the ML pipeline using the cached .npz file
             pipeline_H2Crop_standard_ML_algo(
                 save_results_dir=save_dir, 
-                data_path=data_path,       # We now pass the path to the .npz file
+                data_path=data_path,       
                 modality=mod,
-                detail_layer=3,            # Kept for taxonomy dictionary lookups
+                detail_layer=3,            
             )
