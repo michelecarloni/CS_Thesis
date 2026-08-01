@@ -174,7 +174,7 @@ def pipeline_standard_ml_algo(dataset_config_dict, save_dir, use_undersampling=F
 
 
 
-def pipeline_H2Crop_standard_ML_algo(save_results_dir, data_path, modality, detail_layer=0, use_gpu=False):
+def pipeline_H2Crop_standard_ML_algo(save_results_dir, data_path, modality, detail_layer=0, use_gpu=True):
     """
     Modular pipeline to train and evaluate baseline ML algorithms on H2Crop data.
     Loads pre-extracted .npz arrays to bypass redundant I/O operations.
