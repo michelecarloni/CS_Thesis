@@ -1,20 +1,23 @@
 import optuna
+import warnings
 
-# Scikit-Learn (CPU Models)
+# Scikit-Learn (CPU Model)
 from sklearn.tree import DecisionTreeClassifier
-from sklearn.linear_model import LogisticRegression
 
 # NVIDIA RAPIDS cuML (GPU Models)
 from cuml.ensemble import RandomForestClassifier as cuRF
 from cuml.svm import LinearSVC as cuSVC
+from cuml.linear_model import LogisticRegression as cuLogReg
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-def optimize_hyperparameters(model_name, X_train, y_train, X_val, y_val, n_trials=20, random_state=42):
+def optimize_hyperparameters(model_name, X_train, y_train, X_val, y_val, n_trials=20, random_state=42, use_gpu=True):
     """
-    Unified Optuna tuner utilizing CPU and GPU processing appropriately.
+    Unified Optuna tuner utilizing the HPC Cluster.
+    use_gpu=True by default. Decision Tree remains on CPU; all others run on cuML.
     """
     def objective(trial):
+        # --- 1. Decision Tree (Always CPU - Fast and robust) ---
         if model_name == "decision_tree":
             params = {
                 'criterion': trial.suggest_categorical('criterion', ['gini', 'entropy']),
@@ -25,6 +28,7 @@ def optimize_hyperparameters(model_name, X_train, y_train, X_val, y_val, n_trial
             }
             model = DecisionTreeClassifier(**params)
 
+        # --- 2. Random Forest (GPU Accelerated) ---
         elif model_name == "random_forest":
             params = {
                 'n_estimators': trial.suggest_int('n_estimators', 50, 250, step=50),
@@ -35,27 +39,30 @@ def optimize_hyperparameters(model_name, X_train, y_train, X_val, y_val, n_trial
             }
             model = cuRF(**params)
 
+        # --- 3. Linear SVM (GPU Accelerated) ---
         elif model_name == "linear_svm":
             params = {
                 'C': trial.suggest_float('C', 1e-4, 1e2, log=True),
-                'max_iter': 2000
+                'max_iter': 5000
             }
             model = cuSVC(**params)
 
+        # --- 4. Logistic Regression (GPU Accelerated) ---
         elif model_name == "logistic_regression":
-            # Safely shifted to CPU to prevent cuBLAS OOM
             params = {
                 'C': trial.suggest_float('C', 1e-3, 1e2, log=True),
-                'solver': 'lbfgs',
-                'max_iter': 2000,
-                'random_state': random_state
+                'max_iter': 5000
             }
-            model = LogisticRegression(**params)
+            model = cuLogReg(**params)
 
         else:
             raise ValueError(f"Unknown model_name: '{model_name}'")
 
-        model.fit(X_train, y_train)
+        # Catch cuML convergence warnings to keep HPC logs clean
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model.fit(X_train, y_train)
+            
         return model.score(X_val, y_val)
 
     sampler = optuna.samplers.TPESampler(seed=random_state)
@@ -67,7 +74,10 @@ def optimize_hyperparameters(model_name, X_train, y_train, X_val, y_val, n_trial
 
     best_params = study.best_params
     best_model = _build_model(model_name, best_params, random_state)
-    best_model.fit(X_train, y_train)
+    
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        best_model.fit(X_train, y_train)
 
     return best_model, best_params
 
@@ -81,7 +91,8 @@ def _build_model(model_name, params, random_state):
         return cuRF(**params, random_state=random_state)
         
     elif model_name == "linear_svm":
-        return cuSVC(**params, max_iter=2000)
+        return cuSVC(**params, max_iter=5000)
         
     elif model_name == "logistic_regression":
-        return LogisticRegression(**params, random_state=random_state)
+        # cuLogReg doesn't support the random_state parameter directly in the same way Scikit-Learn does
+        return cuLogReg(**params)
