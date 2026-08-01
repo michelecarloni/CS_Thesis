@@ -1,16 +1,14 @@
 import optuna
 import warnings
 
-# Scikit-Learn (CPU Models - Kept only for Decision Tree)
+# Scikit-Learn
 from sklearn.tree import DecisionTreeClassifier
+from sklearn.multiclass import OneVsRestClassifier as skOvR # Imported Scikit-Learn's stable meta-estimator
 
 # NVIDIA RAPIDS cuML (GPU Models)
 try:
     from cuml.ensemble import RandomForestClassifier as cuRF
-    # Import the Mini-Batch SGD Classifier which is safe for 8GB VRAM
     from cuml.linear_model import MBSGDClassifier as cuMBSGD
-    # Import the GPU-accelerated One-vs-Rest wrapper for multiclass
-    from cuml.multiclass import OneVsRestClassifier as cuOvR
 except ImportError:
     pass
 
@@ -44,7 +42,7 @@ def optimize_hyperparameters(model_name, X_train, y_train, X_val, y_val, n_trial
             }
             model = cuRF(**params)
 
-        # --- 3. Linear SVM (GPU via Mini-Batch SGD wrapped in OvR) ---
+        # --- 3. Linear SVM (GPU via Mini-Batch SGD wrapped safely in skOvR) ---
         elif model_name == "linear_svm":
             params = {
                 'loss': 'hinge', 
@@ -55,9 +53,9 @@ def optimize_hyperparameters(model_name, X_train, y_train, X_val, y_val, n_trial
                 'learning_rate': 'adaptive'
             }
             base_model = cuMBSGD(**params)
-            model = cuOvR(estimator=base_model)
+            model = skOvR(estimator=base_model) # Using stable CPU wrapper
 
-        # --- 4. Logistic Regression (GPU via Mini-Batch SGD wrapped in OvR) ---
+        # --- 4. Logistic Regression (GPU via Mini-Batch SGD wrapped safely in skOvR) ---
         elif model_name == "logistic_regression":
             params = {
                 'loss': 'log', 
@@ -68,7 +66,7 @@ def optimize_hyperparameters(model_name, X_train, y_train, X_val, y_val, n_trial
                 'learning_rate': 'adaptive'
             }
             base_model = cuMBSGD(**params)
-            model = cuOvR(estimator=base_model)
+            model = skOvR(estimator=base_model) # Using stable CPU wrapper
 
         else:
             raise ValueError(f"Unknown model_name: '{model_name}'")
@@ -106,7 +104,7 @@ def _build_model(model_name, params, random_state):
         return cuRF(**params, random_state=random_state)
         
     elif model_name == "linear_svm":
-        return cuOvR(estimator=cuMBSGD(**params))
+        return skOvR(estimator=cuMBSGD(**params))
         
     elif model_name == "logistic_regression":
-        return cuOvR(estimator=cuMBSGD(**params))
+        return skOvR(estimator=cuMBSGD(**params))
