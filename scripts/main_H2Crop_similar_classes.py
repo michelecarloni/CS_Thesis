@@ -32,9 +32,9 @@ if __name__ == "__main__":
 
     # Pair paths with their respective class lists
     experiments = [
-        (sub_3_path, sub_3),
-        (sub_2_path, sub_2),
         (sub_1_path, sub_1),
+        (sub_2_path, sub_2),
+        (sub_3_path, sub_3),
         (sub_4_path, sub_4)
     ]
 
