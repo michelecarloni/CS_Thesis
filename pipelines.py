@@ -1,7 +1,6 @@
 import os
 import json
 import gc
-from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -15,12 +14,8 @@ from sklearn.metrics import classification_report, confusion_matrix, accuracy_sc
 from utils import load_hyperspectral_dataset, normalize_features
 from H2Crop.data_structures import h2crop_taxonomy_dict
 from hyperparameter_tuning import optimize_hyperparameters
-from contextlib import redirect_stdout
 
-from cuml.ensemble import RandomForestClassifier as cuRF
-from cuml.linear_model import LogisticRegression as cuLogReg
-from cuml.svm import LinearSVC as cuSVC
-
+import pandas as pd
 import cupy as cp
 
 """
@@ -177,7 +172,8 @@ def pipeline_standard_ml_algo(dataset_config_dict, save_dir, use_undersampling=F
 def pipeline_H2Crop_standard_ML_algo(save_results_dir, data_path, modality, detail_layer=0, use_gpu=True):
     """
     Modular pipeline to train and evaluate baseline ML algorithms on H2Crop data.
-    Loads pre-extracted .npz arrays and securely manages GPU VRAM pools.
+    Automatically extracts feature importances and coefficients for thesis analysis.
+    GPU is enabled by default.
     """
     
     if not os.path.exists(data_path):
@@ -280,8 +276,9 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, data_path, modality, deta
         
         taxonomy_key = f'Taxonomy_{detail_layer}'
         current_taxonomy = h2crop_taxonomy_dict.get(taxonomy_key, {})
-        target_names = [current_taxonomy.get(c, f"Class {c}") for c in best_model.classes_]
+        target_names = [current_taxonomy.get(c, f"Class {c}") for c in np.unique(y_test)]
         
+        # Save Performance Report
         report_path = os.path.join(algo_dir, "performance.txt")
         report = classification_report(y_test, y_pred, zero_division=0, target_names=target_names)
         
@@ -291,6 +288,7 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, data_path, modality, deta
             f.write(f"\n\n--- Test Set Classification Report ---\n")
             f.write(report)
             
+        # Save Confusion Matrix
         matrix_path = os.path.join(algo_dir, "confusion_matrix.png")
         fig_size = max(10, len(target_names) * 0.4)
         fig, ax = plt.subplots(figsize=(fig_size, fig_size * 0.8))
@@ -305,5 +303,57 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, data_path, modality, deta
         plt.tight_layout()
         plt.savefig(matrix_path, dpi=300)
         plt.close(fig)
+
+        # -------------------------------------------------------------
+        # 5. Extract & Save Feature Significance (Gini & Coefficients)
+        # -------------------------------------------------------------
+        print(f"    Extracting Feature Significance metrics...")
+        try:
+            if algo_name in ["decision_tree", "random_forest"]:
+                # Extract Gini importance from tree models
+                importances = best_model.feature_importances_
+                
+                # Safely convert GPU array to CPU numpy array if necessary
+                if hasattr(importances, 'get'):
+                    importances = importances.get()
+                elif hasattr(importances, 'to_numpy'):
+                    importances = importances.to_numpy()
+                else:
+                    importances = np.array(importances)
+                    
+                df_imp = pd.DataFrame({
+                    "Band_Index": np.arange(len(importances)),
+                    "Gini_Importance": importances
+                })
+                df_imp.to_csv(os.path.join(algo_dir, "feature_importances.csv"), index=False)
+                
+            elif algo_name in ["logistic_regression", "linear_svm"]:
+                # The model is wrapped in OneVsRestClassifier
+                # Extract the coefficient matrix for each class
+                coefs = []
+                for estimator in best_model.estimators_:
+                    c = estimator.coef_
+                    
+                    # Safely convert GPU array to CPU numpy array if necessary
+                    if hasattr(c, 'get'):
+                        c = c.get()
+                    elif hasattr(c, 'to_numpy'):
+                        c = c.to_numpy()
+                    else:
+                        c = np.array(c)
+                        
+                    coefs.append(c.flatten())
+                
+                coefs_matrix = np.array(coefs)
+                
+                # Create a CSV where rows are Crop Classes and columns are Hyperspectral Bands
+                band_columns = [f"Band_{i}" for i in range(coefs_matrix.shape[1])]
+                df_coef = pd.DataFrame(coefs_matrix, columns=band_columns)
+                df_coef.insert(0, "Crop_Class", target_names) 
+                
+                df_coef.to_csv(os.path.join(algo_dir, "model_coefficients.csv"), index=False)
+
+        except Exception as e:
+            print(f"    [Warning] Could not extract feature metrics for {algo_name}: {str(e)}")
         
     print(f"\nPipeline completed successfully for {modality.upper()}!")
