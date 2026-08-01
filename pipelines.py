@@ -21,6 +21,8 @@ from cuml.ensemble import RandomForestClassifier as cuRF
 from cuml.linear_model import LogisticRegression as cuLogReg
 from cuml.svm import LinearSVC as cuSVC
 
+import cupy as cp
+
 """
 Pipeline called for the first experiment (First Baseline):
     - Datasets: indian_pines, salinas_valley, pavia_center, pavia_university
@@ -249,7 +251,7 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, data_path, modality, deta
     # 4. Model Tuning and Evaluation
     # -------------------------------------------------------------
     models_to_run = {
-        "decision_tree": 30,
+        "decision_tree": 15,
         "random_forest": 30,
         "logistic_regression": 20,
         "linear_svm": 20
@@ -257,6 +259,15 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, data_path, modality, deta
 
     for algo_name, n_trials in models_to_run.items():
         print(f"\n--> Tuning and Training {algo_name} with Optuna ({n_trials} trials)...")
+
+        # GPU VRAM CLEANUP
+        # Clear CuPy cache & system RAM before starting a new model
+        gc.collect()
+        try:
+            cp.get_default_memory_pool().free_all_blocks()
+            cp.get_default_pinned_memory_pool().free_all_blocks()
+        except Exception:
+            pass
         
         # Optimize on Val set and return the best model trained on X_train
         best_model, best_params = optimize_hyperparameters(

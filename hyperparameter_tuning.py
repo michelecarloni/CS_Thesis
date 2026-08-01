@@ -18,11 +18,11 @@ def optimize_hyperparameters(model_name, X_train, y_train, X_val, y_val, n_trial
     """
     
     def objective(trial):
-        # --- 1. Decision Tree (Remains on CPU - Extremely Fast Anyway) ---
+        # --- 1. Decision Tree (CPU - Throttled Search Space) ---
         if model_name == "decision_tree":
             params = {
                 'criterion': trial.suggest_categorical('criterion', ['gini', 'entropy']),
-                'max_depth': trial.suggest_int('max_depth', 3, 30),
+                'max_depth': trial.suggest_int('max_depth', 3, 15), # Throttled from 30 to 15
                 'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
                 'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 10),
                 'random_state': random_state
