@@ -6,16 +6,12 @@ project_root = os.path.abspath('..')
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-from utils import read_file_sample
 from H2Crop.H2Crop import H2Crop
 
 # Import your newly updated pipeline
 from pipelines import pipeline_H2Crop_standard_ML_algo
 
 if __name__ == "__main__":
-    
-    file_sample_path = '../H2Crop/file_sample_list.txt'
-    file_list = read_file_sample(file_sample_path)
 
     loader = H2Crop()
 
@@ -44,6 +40,9 @@ if __name__ == "__main__":
 
     modality = ["hyperspectral", "multispectral"]
 
+    # Generate the chunked list ONCE for the entire script
+    chunked_file_list = loader.get_chunked_file_list(300)
+
     # Execute pipeline
     for save_dir, class_list in experiments:
         
@@ -55,15 +54,28 @@ if __name__ == "__main__":
             print(f"*** RUNNING EXPERIMENT: {save_dir.split('/')[-1]} | {mod.upper()} ***")
             print(f"{'*'*60}")
             
+            # 1. Extract (or load) the cached pixels
+            data_path = loader.extract_H2Crop_pixel_sample(
+                save_dir=save_dir,
+                file_chunks_list=chunked_file_list,
+                modality=mod,
+                class_action="keep",
+                class_list=class_list,
+                detail_layer=3,
+                static=True,
+                keep_prior=False,
+                samples_per_class=50000
+            )
+            
+            # Check if extraction was successful
+            if not data_path:
+                print(f"Skipping {mod} for {save_dir} due to extraction failure.")
+                continue
+
+            # 2. Run the ML pipeline using the cached .npz file
             pipeline_H2Crop_standard_ML_algo(
                 save_results_dir=save_dir, 
-                file_list=file_list,
+                data_path=data_path,       # We now pass the path to the .npz file
                 modality=mod,
-                class_action="keep",       
-                class_list=class_list,     
-                loader=loader,
-                detail_layer=3,            
-                static=True,
-                samples_per_class=50000,
-                allow_resample=True     
+                detail_layer=3,            # Kept for taxonomy dictionary lookups
             )

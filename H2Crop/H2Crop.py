@@ -1,7 +1,10 @@
 import os
 import h5py
 import numpy as np
+from tqdm import tqdm
 import random
+import gc
+from contextlib import redirect_stdout
 
 class H2Crop:
     def __init__(self, dataset_path='/media/michele/T7/datasets/H2Crop'):
@@ -15,6 +18,163 @@ class H2Crop:
         if not os.path.exists(self.h5_dir):
             print(f"Warning: Directory not found at {self.h5_dir}")
 
+    def extract_H2Crop_pixel_sample(self, save_dir, file_chunks_list, modality, class_action="drop", class_list=None, detail_layer=0, static=True, keep_prior=False, samples_per_class=25000):
+        """
+        Extracts, balances, and saves pixel-wise samples to disk to prevent redundant processing.
+        
+        Parameters:
+        - save_dir: Directory where the extracted .npz file will be saved.
+        - file_chunks_list: List of file chunks to process.
+        - modality: "hyperspectral" or "multispectral".
+        - class_action: "drop" or "keep".
+        - class_list: List of class IDs to filter.
+        - detail_layer: Taxonomy detail level (e.g., 3).
+        - static: Boolean, whether to extract static snapshot or temporal data.
+        - keep_prior: Boolean, whether to append prior data.
+        - samples_per_class: Target number of samples per class.
+        
+        Returns:
+        - str: Path to the saved .npz file.
+        """
+        
+        
+        if modality.lower() not in ["hyperspectral", "multispectral"]:
+            print('Extraction aborted: modality is neither "Hyperspectral" nor "Multispectral"')
+            return None
+
+        class_action = class_action.lower()
+        if class_action not in ["drop", "keep"]:
+            print('Extraction aborted: class_action must be either "drop" or "keep"')
+            return None
+
+        os.makedirs(save_dir, exist_ok=True)
+        save_file_path = os.path.join(save_dir, f"{modality}_extracted_pixels.npz")
+        
+        # Check if it already exists to avoid accidental overwrites
+        if os.path.exists(save_file_path):
+            print(f"\n[Info] Data already extracted for {modality} at {save_file_path}.")
+            print("To re-extract, delete the existing file first.")
+            return save_file_path
+
+        print(f"\n{'='*60}")
+        print(f"STARTING PIXEL EXTRACTION: {modality.upper()}")
+        print(f"Target: {samples_per_class} samples per class")
+        print(f"{'='*60}")
+
+        collected_X = {}
+        class_counts = {}
+        target_classes = set(class_list) if (class_action == "keep" and class_list is not None) else None
+        files_processed = 0
+
+        # Mute inner prints to keep tqdm clean
+        with open(os.devnull, 'w') as devnull:
+            for current_chunk in tqdm(file_chunks_list, desc=f"Extracting ({modality})", unit="chunk", position=0, leave=True):
+                files_processed += len(current_chunk)
+                
+                with redirect_stdout(devnull):
+                    batch = self.load_h5_data(
+                        file_list=current_chunk, 
+                        detail_layer=detail_layer, 
+                        static=static, 
+                        data_type=modality, 
+                        keep_prior=keep_prior
+                    )
+                
+                if not batch:
+                    continue
+                    
+                for sample in batch:
+                    X_img = sample[modality]
+                    y_img = sample['labels']
+                    
+                    if modality == "hyperspectral":
+                        X_img = self.upsample_hyperspectral(X_img)
+                        
+                    X_img = np.transpose(X_img, (1, 2, 0))
+                    X_flat = X_img.reshape(-1, X_img.shape[-1])
+                    y_flat = y_img.reshape(-1)
+                    
+                    if keep_prior and 'prior' in sample:
+                        prior_flat = sample['prior'].reshape(-1, 1)
+                        X_flat = np.hstack((X_flat, prior_flat))
+                        
+                    if class_list is not None:
+                        if class_action == "keep":
+                            valid_mask = np.isin(y_flat, class_list)
+                        elif class_action == "drop":
+                            valid_mask = ~np.isin(y_flat, class_list)
+                            
+                        X_flat = X_flat[valid_mask]
+                        y_flat = y_flat[valid_mask]
+
+                    if len(y_flat) == 0:
+                        continue
+                        
+                    unique_classes_in_patch = np.unique(y_flat)
+                    for class_id in unique_classes_in_patch:
+                        if class_counts.get(class_id, 0) >= samples_per_class:
+                            continue
+                            
+                        mask = (y_flat == class_id)
+                        pixels_to_add = X_flat[mask]
+                        
+                        if class_id not in collected_X:
+                            collected_X[class_id] = []
+                            class_counts[class_id] = 0
+                            
+                        collected_X[class_id].append(pixels_to_add)
+                        class_counts[class_id] += len(pixels_to_add)
+                        
+                del batch
+                gc.collect()
+
+                # Termination check
+                if target_classes:
+                    if all(class_counts.get(c, 0) >= samples_per_class for c in target_classes):
+                        print(f"\n--> Success! Target of {samples_per_class} samples reached for target classes.")
+                        break
+                else:
+                    if len(class_counts) > 0 and all(count >= samples_per_class for count in class_counts.values()):
+                        print(f"\n--> Success! Target of {samples_per_class} samples reached for all discovered classes.")
+                        break
+
+        print(f"\nExtraction complete. Processed {files_processed} files.")
+
+        # Balancing Phase
+        X_final_list, y_final_list = [], []
+        print(f"\n--- Final Class Distribution (Target: {samples_per_class}) ---")
+        
+        for class_id, arrs in collected_X.items():
+            X_c = np.vstack(arrs)
+            total_found = len(X_c)
+            
+            if total_found > samples_per_class:
+                idx = np.random.choice(total_found, samples_per_class, replace=False)
+                X_c = X_c[idx]
+                print(f" - Class {class_id}: Found {total_found} -> Downsampled to {samples_per_class}")
+            else:
+                print(f" - Class {class_id}: Found {total_found} -> Kept {total_found} (WARNING: Under target!)")
+                
+            X_final_list.append(X_c)
+            y_final_list.append(np.full(len(X_c), class_id, dtype=np.int32))
+            
+        del collected_X
+        gc.collect()
+            
+        if not X_final_list:
+            print("Extraction aborted: No valid pixels found.")
+            return None
+            
+        X = np.vstack(X_final_list)
+        y = np.concatenate(y_final_list)
+
+        print(f"\nSaving arrays to disk: {X.shape[0]} total pixels...")
+        
+        # Save compressed numpy arrays to save disk space and read time
+        np.savez_compressed(save_file_path, X=X, y=y)
+        print(f"Successfully saved to: {save_file_path}")
+        
+        return save_file_path
 
     def get_file_list(self, from_train, limit, path=None):
         """
@@ -61,6 +221,51 @@ class H2Crop:
         
         print(f"Successfully sampled {len(sampled_ids)} file IDs.")
         return sampled_ids
+
+
+    def get_chunked_file_list(self, chunk_size=300, path=None, random_state=42):
+        """
+        Retrieves all available .h5 files in the dataset, shuffles them to prevent 
+        geographic bias, and splits them into a list of smaller file lists (chunks).
+        
+        Parameters:
+        - chunk_size (int): The maximum number of filenames per sublist.
+        - path (str): Optional path to the directory. Defaults to self.h5_dir.
+        - random_state (int): Seed for reproducibility across different script runs.
+        
+        Returns:
+        - list of lists of strings: A list where each element is a list of file IDs.
+        """
+        if path is None:
+            path = self.h5_dir
+            
+        if not os.path.isdir(path):
+            print(f"Error: Directory not found at {path}")
+            return []
+            
+        # Get all valid files and strip the extension to match your pipeline's format
+        file_names = [f.replace('.h5', '') for f in os.listdir(path) if f.endswith('.h5')]
+        
+        if not file_names:
+            print(f"Error: No valid files found at {path}.")
+            return []
+            
+        # Remove any potential duplicates (just as a safety net)
+        file_names = list(set(file_names))
+            
+        # Shuffle the list to ensure a random geographic distribution in every chunk
+        import random
+        random.seed(random_state)
+        random.shuffle(file_names)
+        
+        # Split the flattened list into a list of lists based on chunk_size
+        chunked_list = [file_names[i:i + chunk_size] for i in range(0, len(file_names), chunk_size)]
+        
+        print(f"Successfully parsed {len(file_names)} total files.")
+        print(f"-> Created {len(chunked_list)} chunks (max {chunk_size} files per chunk).")
+        
+        return chunked_list
+
 
 
     def _load_single_file(self, filename, detail_layer=None, static=False):
