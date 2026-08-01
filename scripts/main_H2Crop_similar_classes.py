@@ -64,7 +64,7 @@ if __name__ == "__main__":
                 detail_layer=3,
                 static=True,
                 keep_prior=False,
-                samples_per_class=100
+                samples_per_class=40000
             )
             
             # Check if extraction was successful

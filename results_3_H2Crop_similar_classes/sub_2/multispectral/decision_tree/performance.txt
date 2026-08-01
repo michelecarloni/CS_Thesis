@@ -1,0 +1,20 @@
+--- Best Optuna Hyperparameters ---
+{
+    "criterion": "entropy",
+    "max_depth": 15,
+    "min_samples_split": 6,
+    "min_samples_leaf": 6
+}
+
+--- Test Set Classification Report ---
+              precision    recall  f1-score   support
+
+       beans       0.90      0.92      0.91      1000
+soy_soybeans       0.85      0.88      0.86      1000
+        peas       0.87      0.84      0.85      1000
+   chickpeas       0.84      0.84      0.84      1000
+     lentils       0.79      0.78      0.78      1000
+
+    accuracy                           0.85      5000
+   macro avg       0.85      0.85      0.85      5000
+weighted avg       0.85      0.85      0.85      5000

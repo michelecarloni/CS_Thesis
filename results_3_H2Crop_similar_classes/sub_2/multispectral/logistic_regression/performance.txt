@@ -1,0 +1,17 @@
+--- Best Optuna Hyperparameters ---
+{
+    "alpha": 0.08345038738528612
+}
+
+--- Test Set Classification Report ---
+              precision    recall  f1-score   support
+
+       beans       0.51      0.77      0.61      1000
+soy_soybeans       0.52      0.48      0.50      1000
+        peas       0.58      0.34      0.43      1000
+   chickpeas       0.60      0.65      0.62      1000
+     lentils       0.50      0.45      0.48      1000
+
+    accuracy                           0.54      5000
+   macro avg       0.54      0.54      0.53      5000
+weighted avg       0.54      0.54      0.53      5000

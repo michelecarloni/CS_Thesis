@@ -1,0 +1,16 @@
+--- Best Optuna Hyperparameters ---
+{
+    "alpha": 4.207988669606632e-05
+}
+
+--- Test Set Classification Report ---
+                                precision    recall  f1-score   support
+
+               temporary_grass       0.76      0.88      0.81      1000
+pasture_meadow_grassland_grass       0.73      0.90      0.81      1000
+               alfalfa_lucerne       0.81      0.76      0.79      1000
+               lolium_ryegrass       0.86      0.58      0.69      1000
+
+                      accuracy                           0.78      4000
+                     macro avg       0.79      0.78      0.78      4000
+                  weighted avg       0.79      0.78      0.78      4000

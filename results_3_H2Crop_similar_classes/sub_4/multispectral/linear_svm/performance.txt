@@ -1,0 +1,16 @@
+--- Best Optuna Hyperparameters ---
+{
+    "alpha": 0.00031489116479568613
+}
+
+--- Test Set Classification Report ---
+                precision    recall  f1-score   support
+
+      potatoes       0.47      0.31      0.37      1000
+beetroot_beets       0.57      0.67      0.62      1000
+carrots_daucus       0.59      0.62      0.60      1000
+       turnips       0.53      0.59      0.55      1000
+
+      accuracy                           0.55      4000
+     macro avg       0.54      0.55      0.54      4000
+  weighted avg       0.54      0.55      0.54      4000

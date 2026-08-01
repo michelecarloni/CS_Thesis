@@ -1,0 +1,19 @@
+--- Best Optuna Hyperparameters ---
+{
+    "criterion": "entropy",
+    "max_depth": 13,
+    "min_samples_split": 6,
+    "min_samples_leaf": 2
+}
+
+--- Test Set Classification Report ---
+                          precision    recall  f1-score   support
+
+           winter_barley       0.98      0.96      0.97      1000
+winter_common_soft_wheat       0.97      0.94      0.96      1000
+           spring_barley       0.94      0.97      0.95      1000
+spring_common_soft_wheat       0.96      0.97      0.97      1000
+
+                accuracy                           0.96      4000
+               macro avg       0.96      0.96      0.96      4000
+            weighted avg       0.96      0.96      0.96      4000
