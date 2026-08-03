@@ -1,5 +1,9 @@
 import optuna
 import warnings
+import copy
+import torch
+import torch.nn as nn
+import torch.optim as optim
 
 # Scikit-Learn
 from sklearn.tree import DecisionTreeClassifier
@@ -14,6 +18,9 @@ except ImportError:
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
+
+
+# For Standard ML algorithm
 def optimize_hyperparameters(model_name, X_train, y_train, X_val, y_val, n_trials=20, random_state=42, use_gpu=True):
     """
     Unified Optuna tuner optimized for local 8GB VRAM (RTX 4060).
@@ -108,3 +115,72 @@ def _build_model(model_name, params, random_state):
         
     elif model_name == "logistic_regression":
         return skOvR(estimator=cuMBSGD(**params))
+
+
+
+# For models that works with a Convolutional layer
+def optimize_cnn_hyperparameters(model, train_loader, val_loader, initial_model_state, n_trials=10, epochs_per_trial=5, use_gpu=True):
+    """
+    Optuna optimization logic for PyTorch CNNs.
+    Returns the best hyperparameters found during the study.
+    """
+    def objective(trial):
+        # Reset model to its pristine initial state before each trial
+        model.load_state_dict(copy.deepcopy(initial_model_state))
+        
+        # Define the hyperparameter search space
+        lr = trial.suggest_float("lr", 1e-5, 1e-2, log=True)
+        optimizer_name = trial.suggest_categorical("optimizer", ["Adam", "SGD"])
+        weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-2, log=True)
+        
+        # Initialize optimizer based on Optuna's suggestion
+        if optimizer_name == "Adam":
+            optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+        else:
+            optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=weight_decay)
+            
+        criterion = nn.CrossEntropyLoss()
+        
+        # Training Loop
+        for epoch in range(epochs_per_trial):
+            model.train()
+            for batch_X, batch_y in train_loader:
+                if use_gpu and torch.cuda.is_available():
+                    batch_X, batch_y = batch_X.cuda(), batch_y.cuda()
+                    
+                optimizer.zero_grad()
+                outputs = model(batch_X)
+                loss = criterion(outputs, batch_y)
+                loss.backward()
+                optimizer.step()
+                
+            # Validation Loop
+            model.eval()
+            correct, total = 0, 0
+            with torch.no_grad():
+                for batch_X, batch_y in val_loader:
+                    if use_gpu and torch.cuda.is_available():
+                        batch_X, batch_y = batch_X.cuda(), batch_y.cuda()
+                        
+                    outputs = model(batch_X)
+                    _, predicted = torch.max(outputs.data, 1)
+                    total += batch_y.size(0)
+                    correct += (predicted == batch_y).sum().item()
+                    
+            val_accuracy = correct / total
+            
+            # Prune unpromising trials early
+            trial.report(val_accuracy, epoch)
+            if trial.should_prune():
+                raise optuna.exceptions.TrialPruned()
+                
+        return val_accuracy
+
+    print(f"\n--- Running Optuna Tuning ({n_trials} Trials) ---")
+    study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=42))
+    study.optimize(objective, n_trials=n_trials)
+    
+    print(f"\n[Optuna] Best Trial: {study.best_trial.number}")
+    print(f"[Optuna] Best Validation Accuracy: {study.best_value:.4f}")
+    
+    return study.best_params
