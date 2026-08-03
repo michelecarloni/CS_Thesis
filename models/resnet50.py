@@ -12,6 +12,7 @@ class ResNet50(nn.Module):
         
         # Load the base ResNet50 architecture
         self.model = resnet50(weights=None)
+        self.name = "ResNet-50"
         
         # Modify the first convolutional layer
         self.model.conv1 = nn.Conv2d(

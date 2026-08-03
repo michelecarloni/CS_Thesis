@@ -12,6 +12,7 @@ class ResNet18(nn.Module):
         
         # Load the base ResNet18 architecture
         self.model = resnet18(weights=None)
+        self.name = "ResNet-18"
         
         # Modify the first convolutional layer
         self.model.conv1 = nn.Conv2d(
