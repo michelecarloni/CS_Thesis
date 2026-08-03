@@ -38,7 +38,8 @@ if __name__ == "__main__":
             save_base_dir=save_tile_ds_dir, 
             modality=mod, 
             taxonomy=taxonomy, 
-            patch_size=32
+            patch_size=32,
+            max_files=100
         )
 
     # ==========================================

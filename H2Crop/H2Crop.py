@@ -177,7 +177,7 @@ class H2Crop:
         
         return save_file_path
 
-    def extract_and_save_tiles(self, save_base_dir, modality="hyperspectral", taxonomy=3, patch_size=32):
+    def extract_and_save_tiles(self, save_base_dir, modality="hyperspectral", taxonomy=3, patch_size=32, max_files=None):
         """
         Iterates through the h5_data directory, extracts spatial patches,
         calculates the predominant class for each, and saves them to disk.
@@ -187,6 +187,7 @@ class H2Crop:
         - modality: string, "hyperspectral" or "multispectral" (default: "hyperspectral")
         - taxonomy: int, defines the taxonomy level for labels (default: 3)
         - patch_size: int, height and width of the extracted square tile (default: 32)
+        - max_files: int or None, limit the number of files processed for quick testing
         """
         # 1. Dynamically create the final save directory based on modality and taxonomy
         final_save_dir = os.path.join(save_base_dir, f"{modality}_taxonomy_{taxonomy}")
@@ -200,10 +201,19 @@ class H2Crop:
         
         print(f"Found {len(h5_files)} images in {self.h5_dir}.")
         print(f"Extracting {patch_size}x{patch_size} tiles to: {final_save_dir}")
+        if max_files is not None:
+            print(f"[Testing Mode] Execution limited to the first {max_files} files.")
+            
         total_tiles = 0
+        files_processed = 0
         
         # 3. Iterate through each file
         for filename in tqdm(h5_files, desc=f"Extracting Tiles ({modality})"):
+            # Early exit for smoke testing
+            if max_files is not None and files_processed >= max_files:
+                print(f"\nReached testing limit of {max_files} files. Halting extraction.")
+                break
+                
             file_path = os.path.join(self.h5_dir, filename)
             sample_id = filename.replace('.h5', '')
             
@@ -213,17 +223,15 @@ class H2Crop:
                     
                     # --- A. Load Label Mask ---
                     labels_full = np.array(h5f['label'])
-                    mask_array = labels_full[taxonomy] # Select the specific taxonomy layer
+                    mask_array = labels_full[taxonomy]
                     
                     # --- B. Load Image Array ---
                     if modality.lower() == "hyperspectral":
                         image_array = np.array(h5f['EnMAP_data'])
-                        # MUST upsample from 64x64 to 192x192 to match the label mask resolution
                         image_array = self.upsample_hyperspectral(image_array)
                         
                     elif modality.lower() == "multispectral":
                         s2_full = np.array(h5f['S2_data'])
-                        # Extract the correct month slice to match EnMAP static resolution
                         month_str = filename[4:6]
                         s2_time_index = int(month_str) - 1
                         image_array = s2_full[s2_time_index]
@@ -237,24 +245,23 @@ class H2Crop:
                     for i in range(0, h - patch_size + 1, patch_size):
                         for j in range(0, w - patch_size + 1, patch_size):
                             
-                            # Slice the patch
                             img_patch = image_array[:, i:i+patch_size, j:j+patch_size]
                             mask_patch = mask_array[i:i+patch_size, j:j+patch_size]
                             
-                            # Calculate the predominant class
                             predominant_class = int(mode(mask_patch.flatten(), keepdims=False)[0])
                             
-                            # Save the tile
                             tile_filename = os.path.join(final_save_dir, f"{sample_id}_tile_{i}_{j}.npz")
                             np.savez_compressed(tile_filename, X=img_patch, y=predominant_class)
                             
                             total_tiles += 1
                             
+                files_processed += 1
+                            
             except Exception as e:
                 print(f"\n[Error] Failed to process {filename}: {str(e)}")
                 continue
                     
-        print(f"\nExtraction complete! {total_tiles} tiles successfully saved.")
+        print(f"\nExtraction complete! {total_tiles} tiles successfully saved from {files_processed} files.")
 
     def get_file_list(self, from_train, limit, path=None):
         """
