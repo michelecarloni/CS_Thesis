@@ -6,6 +6,9 @@ import random
 import gc
 from scipy.stats import mode
 from contextlib import redirect_stdout
+import shutil
+from sklearn.model_selection import train_test_split
+
 
 class H2Crop:
     def __init__(self, dataset_path='/media/michele/T7/datasets/H2Crop'):
@@ -181,19 +184,11 @@ class H2Crop:
         """
         Iterates through the h5_data directory, extracts spatial patches,
         calculates the predominant class for each, and saves them to disk.
-        
-        Parameters:
-        - save_base_dir: string, base directory to save the extracted tiles
-        - modality: string, "hyperspectral" or "multispectral" (default: "hyperspectral")
-        - taxonomy: int, defines the taxonomy level for labels (default: 3)
-        - patch_size: int, height and width of the extracted square tile (default: 32)
-        - max_files: int or None, limit the number of files processed for quick testing
+        After extraction, it organizes them into Train/Val/Test folders.
         """
-        # 1. Dynamically create the final save directory based on modality and taxonomy
         final_save_dir = os.path.join(save_base_dir, f"{modality}_taxonomy_{taxonomy}")
         os.makedirs(final_save_dir, exist_ok=True)
         
-        # 2. Grab all .h5 files using the class's predefined h5 directory
         h5_files = [f for f in os.listdir(self.h5_dir) if f.endswith('.h5')]
         if not h5_files:
             print(f"[Warning] No .h5 files found in {self.h5_dir}")
@@ -204,12 +199,10 @@ class H2Crop:
         if max_files is not None:
             print(f"[Testing Mode] Execution limited to the first {max_files} files.")
             
-        total_tiles = 0
+        extracted_file_paths = []
         files_processed = 0
         
-        # 3. Iterate through each file
         for filename in tqdm(h5_files, desc=f"Extracting Tiles ({modality})"):
-            # Early exit for smoke testing
             if max_files is not None and files_processed >= max_files:
                 print(f"\nReached testing limit of {max_files} files. Halting extraction.")
                 break
@@ -218,30 +211,24 @@ class H2Crop:
             sample_id = filename.replace('.h5', '')
             
             try:
-                # Open the HDF5 file to stream data instead of loading it all into RAM
                 with h5py.File(file_path, 'r') as h5f:
                     
-                    # --- A. Load Label Mask ---
                     labels_full = np.array(h5f['label'])
                     mask_array = labels_full[taxonomy]
                     
-                    # --- B. Load Image Array ---
                     if modality.lower() == "hyperspectral":
                         image_array = np.array(h5f['EnMAP_data'])
                         image_array = self.upsample_hyperspectral(image_array)
-                        
                     elif modality.lower() == "multispectral":
                         s2_full = np.array(h5f['S2_data'])
                         month_str = filename[4:6]
                         s2_time_index = int(month_str) - 1
                         image_array = s2_full[s2_time_index]
-                        
                     else:
                         raise ValueError("Modality must be 'hyperspectral' or 'multispectral'")
                     
                     _, h, w = image_array.shape
                     
-                    # --- C. Slide the window over the image ---
                     for i in range(0, h - patch_size + 1, patch_size):
                         for j in range(0, w - patch_size + 1, patch_size):
                             
@@ -253,7 +240,8 @@ class H2Crop:
                             tile_filename = os.path.join(final_save_dir, f"{sample_id}_tile_{i}_{j}.npz")
                             np.savez_compressed(tile_filename, X=img_patch, y=predominant_class)
                             
-                            total_tiles += 1
+                            # Track the saved file
+                            extracted_file_paths.append(tile_filename)
                             
                 files_processed += 1
                             
@@ -261,7 +249,47 @@ class H2Crop:
                 print(f"\n[Error] Failed to process {filename}: {str(e)}")
                 continue
                     
-        print(f"\nExtraction complete! {total_tiles} tiles successfully saved from {files_processed} files.")
+        print(f"\nExtraction complete! {len(extracted_file_paths)} tiles successfully saved.")
+        
+        # Trigger the physical Train/Val/Test split on the hard drive
+        if extracted_file_paths:
+            self._split_and_move_tiles(extracted_file_paths, final_save_dir)
+
+    def _split_and_move_tiles(self, file_paths, base_dir):
+        """
+        Private method to split extracted tiles into train/val/test sets
+        and move them into corresponding subdirectories.
+        """
+        print(f"\n--- Organizing tiles into Train/Val/Test splits ---")
+        
+        # 1. Split the file paths (70% Train, 20% Val, 10% Test)
+        train_files, test_files = train_test_split(file_paths, test_size=0.10, random_state=42)
+        train_files, val_files = train_test_split(train_files, test_size=(0.20 / 0.90), random_state=42)
+        
+        splits = {
+            "train": train_files,
+            "validation": val_files,
+            "test": test_files
+        }
+        
+        # 2. Create subdirectories and move the files
+        for split_name, files in splits.items():
+            split_dir = os.path.join(base_dir, split_name)
+            os.makedirs(split_dir, exist_ok=True)
+            
+            moved_count = 0
+            for file_path in files:
+                # Grab just the filename (e.g., sample1_tile_0_0.npz)
+                filename = os.path.basename(file_path)
+                destination = os.path.join(split_dir, filename)
+                
+                # Physically move the file on the hard drive
+                shutil.move(file_path, destination)
+                moved_count += 1
+                
+            print(f" -> Moved {moved_count} tiles to {split_dir}")
+            
+        print("Data splitting and folder organization complete!")
 
     def get_file_list(self, from_train, limit, path=None):
         """
