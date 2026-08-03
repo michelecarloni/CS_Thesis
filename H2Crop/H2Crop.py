@@ -4,6 +4,7 @@ import numpy as np
 from tqdm import tqdm
 import random
 import gc
+from scipy.stats import mode
 from contextlib import redirect_stdout
 
 class H2Crop:
@@ -175,6 +176,47 @@ class H2Crop:
         print(f"Successfully saved to: {save_file_path}")
         
         return save_file_path
+
+    # Add this method inside your H2Crop class
+    def extract_and_save_tiles(self, image_array, mask_array, save_dir, patch_size=32, sample_id=""):
+        """
+        Slices a large satellite image and its label mask into patches.
+        Calculates the predominant class for each patch and saves it to disk.
+
+        Parameters:
+        - image_array: numpy array of shape (Channels, Height, Width)
+        - mask_array: numpy array of shape (Height, Width) containing pixel labels
+        - save_dir: string, directory to save the extracted tiles
+        - patch_size: int, height and width of the extracted square tile
+        - sample_id: string, unique identifier for the source image
+        """
+        os.makedirs(save_dir, exist_ok=True)
+        _, h, w = image_array.shape
+        tile_count = 0
+    
+        # Iterate over the image with a sliding window
+        for i in range(0, h - patch_size + 1, patch_size):
+            for j in range(0, w - patch_size + 1, patch_size):
+            
+                # Slice the image and the mask
+                img_patch = image_array[:, i:i+patch_size, j:j+patch_size]
+                mask_patch = mask_array[i:i+patch_size, j:j+patch_size]
+            
+                # Calculate the predominant class (the mode)
+                # keepdims=False ensures we get a scalar value
+                predominant_class = int(mode(mask_patch.flatten(), keepdims=False)[0])
+            
+                # Optional: Skip saving if the predominant class is 0 (Background)
+                # if predominant_class == 0:
+                #     continue
+            
+                # Save the individual tile to disk to protect RAM
+                tile_filename = os.path.join(save_dir, f"{sample_id}_tile_{tile_count}.npz")
+                np.savez_compressed(tile_filename, X=img_patch, y=predominant_class)
+            
+                tile_count += 1
+            
+        print(f"Extracted and saved {tile_count} tiles for sample {sample_id}.")
 
     def get_file_list(self, from_train, limit, path=None):
         """
