@@ -9,13 +9,13 @@ from torch.utils.data import Dataset
 class H2CropTileDataset(Dataset):
     """
     Custom PyTorch Dataset that loads tiles from disk on the fly.
-    This guarantees we never run out of System RAM.
+    Now accepts a specific list of filepaths (Train, Val, or Test split).
     """
-    def __init__(self, tiles_dir):
-        # Grab a list of all tile file paths
-        self.filepaths = glob.glob(os.path.join(tiles_dir, "*.npz"))
+    def __init__(self, filepaths):
+        # We directly accept the list of files now; no os.path.join or glob needed!
+        self.filepaths = filepaths
         if len(self.filepaths) == 0:
-            raise ValueError(f"No .npz tiles found in {tiles_dir}")
+            raise ValueError("Provided filepaths list is empty.")
         
     def __len__(self):
         return len(self.filepaths)

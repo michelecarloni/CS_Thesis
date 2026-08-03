@@ -10,7 +10,8 @@ from H2Crop.H2Crop import H2Crop
 from pipelines import pipeline_H2Crop_CNN
 
 # Import the wrapper classes we built earlier
-from models import ResNet18, ResNet50 
+from models.resnet18 import ResNet18
+from models.resnet50 import ResNet50
 
 if __name__ == "__main__":
     modality = ["hyperspectral", "multispectral"]
