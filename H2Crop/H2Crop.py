@@ -177,46 +177,84 @@ class H2Crop:
         
         return save_file_path
 
-    # Add this method inside your H2Crop class
-    def extract_and_save_tiles(self, image_array, mask_array, save_dir, patch_size=32, sample_id=""):
+    def extract_and_save_tiles(self, save_base_dir, modality="hyperspectral", taxonomy=3, patch_size=32):
         """
-        Slices a large satellite image and its label mask into patches.
-        Calculates the predominant class for each patch and saves it to disk.
-
+        Iterates through the h5_data directory, extracts spatial patches,
+        calculates the predominant class for each, and saves them to disk.
+        
         Parameters:
-        - image_array: numpy array of shape (Channels, Height, Width)
-        - mask_array: numpy array of shape (Height, Width) containing pixel labels
-        - save_dir: string, directory to save the extracted tiles
-        - patch_size: int, height and width of the extracted square tile
-        - sample_id: string, unique identifier for the source image
+        - save_base_dir: string, base directory to save the extracted tiles
+        - modality: string, "hyperspectral" or "multispectral" (default: "hyperspectral")
+        - taxonomy: int, defines the taxonomy level for labels (default: 3)
+        - patch_size: int, height and width of the extracted square tile (default: 32)
         """
-        os.makedirs(save_dir, exist_ok=True)
-        _, h, w = image_array.shape
-        tile_count = 0
-    
-        # Iterate over the image with a sliding window
-        for i in range(0, h - patch_size + 1, patch_size):
-            for j in range(0, w - patch_size + 1, patch_size):
+        # 1. Dynamically create the final save directory based on modality and taxonomy
+        final_save_dir = os.path.join(save_base_dir, f"{modality}_taxonomy_{taxonomy}")
+        os.makedirs(final_save_dir, exist_ok=True)
+        
+        # 2. Grab all .h5 files using the class's predefined h5 directory
+        h5_files = [f for f in os.listdir(self.h5_dir) if f.endswith('.h5')]
+        if not h5_files:
+            print(f"[Warning] No .h5 files found in {self.h5_dir}")
+            return
+        
+        print(f"Found {len(h5_files)} images in {self.h5_dir}.")
+        print(f"Extracting {patch_size}x{patch_size} tiles to: {final_save_dir}")
+        total_tiles = 0
+        
+        # 3. Iterate through each file
+        for filename in tqdm(h5_files, desc=f"Extracting Tiles ({modality})"):
+            file_path = os.path.join(self.h5_dir, filename)
+            sample_id = filename.replace('.h5', '')
             
-                # Slice the image and the mask
-                img_patch = image_array[:, i:i+patch_size, j:j+patch_size]
-                mask_patch = mask_array[i:i+patch_size, j:j+patch_size]
-            
-                # Calculate the predominant class (the mode)
-                # keepdims=False ensures we get a scalar value
-                predominant_class = int(mode(mask_patch.flatten(), keepdims=False)[0])
-            
-                # Optional: Skip saving if the predominant class is 0 (Background)
-                # if predominant_class == 0:
-                #     continue
-            
-                # Save the individual tile to disk to protect RAM
-                tile_filename = os.path.join(save_dir, f"{sample_id}_tile_{tile_count}.npz")
-                np.savez_compressed(tile_filename, X=img_patch, y=predominant_class)
-            
-                tile_count += 1
-            
-        print(f"Extracted and saved {tile_count} tiles for sample {sample_id}.")
+            try:
+                # Open the HDF5 file to stream data instead of loading it all into RAM
+                with h5py.File(file_path, 'r') as h5f:
+                    
+                    # --- A. Load Label Mask ---
+                    labels_full = np.array(h5f['label'])
+                    mask_array = labels_full[taxonomy] # Select the specific taxonomy layer
+                    
+                    # --- B. Load Image Array ---
+                    if modality.lower() == "hyperspectral":
+                        image_array = np.array(h5f['EnMAP_data'])
+                        # MUST upsample from 64x64 to 192x192 to match the label mask resolution
+                        image_array = self.upsample_hyperspectral(image_array)
+                        
+                    elif modality.lower() == "multispectral":
+                        s2_full = np.array(h5f['S2_data'])
+                        # Extract the correct month slice to match EnMAP static resolution
+                        month_str = filename[4:6]
+                        s2_time_index = int(month_str) - 1
+                        image_array = s2_full[s2_time_index]
+                        
+                    else:
+                        raise ValueError("Modality must be 'hyperspectral' or 'multispectral'")
+                    
+                    _, h, w = image_array.shape
+                    
+                    # --- C. Slide the window over the image ---
+                    for i in range(0, h - patch_size + 1, patch_size):
+                        for j in range(0, w - patch_size + 1, patch_size):
+                            
+                            # Slice the patch
+                            img_patch = image_array[:, i:i+patch_size, j:j+patch_size]
+                            mask_patch = mask_array[i:i+patch_size, j:j+patch_size]
+                            
+                            # Calculate the predominant class
+                            predominant_class = int(mode(mask_patch.flatten(), keepdims=False)[0])
+                            
+                            # Save the tile
+                            tile_filename = os.path.join(final_save_dir, f"{sample_id}_tile_{i}_{j}.npz")
+                            np.savez_compressed(tile_filename, X=img_patch, y=predominant_class)
+                            
+                            total_tiles += 1
+                            
+            except Exception as e:
+                print(f"\n[Error] Failed to process {filename}: {str(e)}")
+                continue
+                    
+        print(f"\nExtraction complete! {total_tiles} tiles successfully saved.")
 
     def get_file_list(self, from_train, limit, path=None):
         """
