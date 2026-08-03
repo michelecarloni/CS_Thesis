@@ -506,14 +506,25 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
             all_preds.extend(predicted.cpu().numpy())
             all_targets.extend(batch_y.cpu().numpy())
             
+    # =================================================================
     # 7. Save Report and Confusion Matrix
+    # =================================================================
     print(f"\n--- Saving Results to {algo_dir} ---")
     
-    unique_classes = np.unique(all_targets)
+    # Combine targets and predictions to capture all classes generated during testing
+    unique_classes = np.unique(np.concatenate((all_targets, all_preds)))
     target_names = [f"Class {c}" for c in unique_classes]
     
     report_path = os.path.join(algo_dir, "performance.txt")
-    report = classification_report(all_targets, all_preds, zero_division=0, target_names=target_names)
+    
+    # Explicitly provide the 'labels' array to force matching dimensions
+    report = classification_report(
+        all_targets, 
+        all_preds, 
+        labels=unique_classes, 
+        target_names=target_names, 
+        zero_division=0
+    )
     
     with open(report_path, "w") as f:
         f.write(f"--- Best Optuna Hyperparameters ---\n")
@@ -526,7 +537,13 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
     fig, ax = plt.subplots(figsize=(fig_size, fig_size * 0.8))
     
     ConfusionMatrixDisplay.from_predictions(
-        all_targets, all_preds, ax=ax, cmap='Blues', colorbar=False, display_labels=target_names
+        all_targets, 
+        all_preds, 
+        labels=unique_classes, # Also apply it here for the matrix
+        ax=ax, 
+        cmap='Blues', 
+        colorbar=False, 
+        display_labels=target_names
     )
     
     plt.title(f"Confusion Matrix: {model_name}\n({modality} | Tuned via Optuna)")
