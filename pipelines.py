@@ -372,7 +372,7 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, data_path, modality, deta
 def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size=32, n_trials=10, epochs_per_trial=5, use_gpu=True):
     """
     Trains a pre-instantiated CNN with Train/Val/Test splits.
-    Delegates tuning to an external script, then evaluates and saves reports.
+    Delegates tuning to an external script, then evaluates and saves reports/checkpoints.
     """
     model_name = getattr(model, 'name', 'Unknown_CNN_Model')
     
@@ -401,7 +401,7 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
     # 3. Save the initial "blank slate" weights of the model
     initial_model_state = copy.deepcopy(model.state_dict())
 
-    # 4. Call external Optuna tuner
+    # 4. Call external Optuna tuner (Requires cnn_tuning.py)
     best_params = optimize_cnn_hyperparameters(
         model=model,
         train_loader=train_loader,
@@ -412,7 +412,9 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
         use_gpu=use_gpu
     )
 
-    # 5. Final Retraining on Train Set with Best Parameters
+    # =================================================================
+    # 5. Final Retraining with Best Parameters (Checkpointing Added)
+    # =================================================================
     print("\n--- Retraining with Best Parameters for Final Evaluation ---")
     model.load_state_dict(copy.deepcopy(initial_model_state))
     
@@ -423,17 +425,75 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
         
     criterion = nn.CrossEntropyLoss()
     
+    # Set up Checkpoint Directory
+    checkpoint_dir = os.path.join("..", "checkpoints", model_name.lower(), modality)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    # Track losses for plotting
+    train_losses = []
+    val_losses = []
+    
     for epoch in range(epochs_per_trial):
+        # -- Training Phase --
         model.train()
+        running_train_loss = 0.0
+        
         for batch_X, batch_y in train_loader:
             if use_gpu and torch.cuda.is_available():
                 batch_X, batch_y = batch_X.cuda(), batch_y.cuda()
+                
             optimizer.zero_grad()
-            loss = criterion(model(batch_X), batch_y)
+            outputs = model(batch_X)
+            loss = criterion(outputs, batch_y)
             loss.backward()
             optimizer.step()
             
+            # Multiply by batch size to get total loss, we will average it at the end
+            running_train_loss += loss.item() * batch_X.size(0)
+            
+        epoch_train_loss = running_train_loss / len(train_loader.dataset)
+        train_losses.append(epoch_train_loss)
+        
+        # -- Validation Phase --
+        model.eval()
+        running_val_loss = 0.0
+        
+        with torch.no_grad():
+            for batch_X, batch_y in val_loader:
+                if use_gpu and torch.cuda.is_available():
+                    batch_X, batch_y = batch_X.cuda(), batch_y.cuda()
+                    
+                outputs = model(batch_X)
+                loss = criterion(outputs, batch_y)
+                running_val_loss += loss.item() * batch_X.size(0)
+                
+        epoch_val_loss = running_val_loss / len(val_loader.dataset)
+        val_losses.append(epoch_val_loss)
+        
+        print(f"    Epoch [{epoch+1}/{epochs_per_trial}] | Train Loss: {epoch_train_loss:.4f} | Val Loss: {epoch_val_loss:.4f}")
+        
+        # -- Save Checkpoint --
+        ckpt_path = os.path.join(checkpoint_dir, f"epoch_{epoch+1}.pt")
+        torch.save(model.state_dict(), ckpt_path)
+
+    # -- Save Loss Curve Plot --
+    plot_path = os.path.join(checkpoint_dir, "loss_curve.png")
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.plot(range(1, epochs_per_trial + 1), train_losses, label='Training Loss', marker='o')
+    ax.plot(range(1, epochs_per_trial + 1), val_losses, label='Validation Loss', marker='o')
+    ax.set_title(f"Loss Curve: {model_name} ({modality.capitalize()})")
+    ax.set_xlabel("Epochs")
+    ax.set_ylabel("Loss")
+    ax.legend()
+    ax.grid(True)
+    plt.tight_layout()
+    plt.savefig(plot_path, dpi=300)
+    plt.close(fig)
+    print(f"-> Saved {epochs_per_trial} checkpoints and loss curve to {checkpoint_dir}")
+            
+    # =================================================================
     # 6. Final Evaluation on Test Set
+    # =================================================================
     model.eval()
     all_preds, all_targets = [], []
     with torch.no_grad():
