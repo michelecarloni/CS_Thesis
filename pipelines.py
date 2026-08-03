@@ -371,7 +371,7 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, data_path, modality, deta
 
 def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size=32, n_trials=10, epochs_per_trial=5, use_gpu=True):
     """
-    Trains a pre-instantiated CNN with Train/Val/Test splits.
+    Trains a pre-instantiated CNN using pre-split train/val/test folders.
     Delegates tuning to an external script, then evaluates and saves reports/checkpoints.
     """
     model_name = getattr(model, 'name', 'Unknown_CNN_Model')
@@ -383,15 +383,19 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
     algo_dir = os.path.join(save_results_dir, modality, model_name)
     os.makedirs(algo_dir, exist_ok=True)
 
-    # 1. Train/Val/Test Split (70 / 20 / 10)
-    all_files = glob.glob(os.path.join(tiles_dir, "*.npz"))
-    if not all_files:
-        raise ValueError(f"No .npz files found in {tiles_dir}")
+    # 1. Load file paths directly from the pre-split subdirectories
+    train_dir = os.path.join(tiles_dir, "train")
+    val_dir = os.path.join(tiles_dir, "validation")
+    test_dir = os.path.join(tiles_dir, "test")
+
+    train_files = glob.glob(os.path.join(train_dir, "*.npz"))
+    val_files = glob.glob(os.path.join(val_dir, "*.npz"))
+    test_files = glob.glob(os.path.join(test_dir, "*.npz"))
+
+    if not train_files or not val_files or not test_files:
+        raise ValueError(f"Missing one or more split folders (train/validation/test) in {tiles_dir}. Run extraction first.")
         
-    train_files, test_files = train_test_split(all_files, test_size=0.10, random_state=42)
-    train_files, val_files = train_test_split(train_files, test_size=(0.20 / 0.90), random_state=42)
-    
-    print(f"Dataset Split: Train ({len(train_files)}), Val ({len(val_files)}), Test ({len(test_files)})")
+    print(f"Dataset Split Loaded: Train ({len(train_files)}), Val ({len(val_files)}), Test ({len(test_files)})")
     
     # 2. Setup DataLoaders
     train_loader = DataLoader(H2CropTileDataset(train_files), batch_size=batch_size, shuffle=True, num_workers=4)
@@ -401,7 +405,7 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
     # 3. Save the initial "blank slate" weights of the model
     initial_model_state = copy.deepcopy(model.state_dict())
 
-    # 4. Call external Optuna tuner (Requires cnn_tuning.py)
+    # 4. Call external Optuna tuner
     best_params = optimize_cnn_hyperparameters(
         model=model,
         train_loader=train_loader,
@@ -425,16 +429,13 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
         
     criterion = nn.CrossEntropyLoss()
     
-    # Set up Checkpoint Directory
     checkpoint_dir = os.path.join("..", "checkpoints", model_name.lower(), modality)
     os.makedirs(checkpoint_dir, exist_ok=True)
     
-    # Track losses for plotting
     train_losses = []
     val_losses = []
     
     for epoch in range(epochs_per_trial):
-        # -- Training Phase --
         model.train()
         running_train_loss = 0.0
         
@@ -448,13 +449,11 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
             loss.backward()
             optimizer.step()
             
-            # Multiply by batch size to get total loss, we will average it at the end
             running_train_loss += loss.item() * batch_X.size(0)
             
         epoch_train_loss = running_train_loss / len(train_loader.dataset)
         train_losses.append(epoch_train_loss)
         
-        # -- Validation Phase --
         model.eval()
         running_val_loss = 0.0
         
@@ -472,11 +471,9 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
         
         print(f"    Epoch [{epoch+1}/{epochs_per_trial}] | Train Loss: {epoch_train_loss:.4f} | Val Loss: {epoch_val_loss:.4f}")
         
-        # -- Save Checkpoint --
         ckpt_path = os.path.join(checkpoint_dir, f"epoch_{epoch+1}.pt")
         torch.save(model.state_dict(), ckpt_path)
 
-    # -- Save Loss Curve Plot --
     plot_path = os.path.join(checkpoint_dir, "loss_curve.png")
     fig, ax = plt.subplots(figsize=(8, 6))
     ax.plot(range(1, epochs_per_trial + 1), train_losses, label='Training Loss', marker='o')
@@ -511,13 +508,10 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
     # =================================================================
     print(f"\n--- Saving Results to {algo_dir} ---")
     
-    # Combine targets and predictions to capture all classes generated during testing
     unique_classes = np.unique(np.concatenate((all_targets, all_preds)))
     target_names = [f"Class {c}" for c in unique_classes]
     
     report_path = os.path.join(algo_dir, "performance.txt")
-    
-    # Explicitly provide the 'labels' array to force matching dimensions
     report = classification_report(
         all_targets, 
         all_preds, 
@@ -539,7 +533,7 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
     ConfusionMatrixDisplay.from_predictions(
         all_targets, 
         all_preds, 
-        labels=unique_classes, # Also apply it here for the matrix
+        labels=unique_classes, 
         ax=ax, 
         cmap='Blues', 
         colorbar=False, 
