@@ -13,10 +13,16 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, ConfusionMatrixDisplay
 from utils import load_hyperspectral_dataset, normalize_features
 from H2Crop.data_structures import h2crop_taxonomy_dict
+from H2Crop.H2CropTileDataset import H2CropTileDataset
 from hyperparameter_tuning import optimize_hyperparameters
-
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
 import pandas as pd
 import cupy as cp
+from models.resnet18 import ResNet18
+from models.resnet50 import ResNet50
 
 """
 Pipeline called for the first experiment (First Baseline):
@@ -357,3 +363,66 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, data_path, modality, deta
             print(f"    [Warning] Could not extract feature metrics for {algo_name}: {str(e)}")
         
     print(f"\nPipeline completed successfully for {modality.upper()}!")
+
+
+
+
+
+
+def pipeline_H2Crop_CNN(model, tiles_dir, modality, batch_size=32, epochs=10, use_gpu=True):
+    """
+    Trains a pre-instantiated CNN on extracted image tiles.
+    """
+    # Access the name directly from the model object you attached
+    model_name = getattr(model, 'name', 'Unknown_CNN_Model')
+    
+    print(f"\n{'='*60}")
+    print(f"STARTING CNN PIPELINE FOR: {modality.upper()} | Model: {model_name}")
+    print(f"{'='*60}")
+    
+    # 1. Setup the Streaming DataLoader
+    dataset = H2CropTileDataset(tiles_dir)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4)
+    print(f"Loaded {len(dataset)} tiles from disk. Batches per epoch: {len(dataloader)}")
+    
+    # 2. Initialize Loss and Optimizer
+    # We pass the pre-instantiated model's parameters directly to the optimizer
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    
+    # 3. Training Loop
+    print("\nStarting Training...")
+    for epoch in range(epochs):
+        # Because your wrapper inherits from nn.Module, calling .train() cascades to the inner model
+        model.train() 
+        running_loss = 0.0
+        
+        for batch_idx, (batch_X, batch_y) in enumerate(dataloader):
+            # Push batch to GPU
+            if use_gpu and torch.cuda.is_available():
+                batch_X, batch_y = batch_X.cuda(), batch_y.cuda()
+                
+            optimizer.zero_grad()
+            
+            # Forward pass
+            outputs = model(batch_X)
+            loss = criterion(outputs, batch_y)
+            
+            # Backward pass and optimize
+            loss.backward()
+            optimizer.step()
+            
+            running_loss += loss.item()
+            
+            if (batch_idx + 1) % 50 == 0:
+                print(f"    Epoch [{epoch+1}/{epochs}], Step [{batch_idx+1}/{len(dataloader)}], Loss: {loss.item():.4f}")
+                
+        epoch_loss = running_loss / len(dataloader)
+        print(f"==> Epoch {epoch+1} Completed | Average Loss: {epoch_loss:.4f}\n")
+        
+        # Empty GPU cache between epochs to prevent VRAM fragmentation
+        if use_gpu:
+            torch.cuda.empty_cache()
+            
+    print("Training Complete!")
+    return model
