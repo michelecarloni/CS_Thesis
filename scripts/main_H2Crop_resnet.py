@@ -33,13 +33,15 @@ if __name__ == "__main__":
     # ==========================================
     print("\n--- Starting Tile Extraction ---")
     for mod in modality:
-        # Reconstruct the exact path where the tiles are expected to be saved
         target_dir = os.path.join(save_tile_ds_dir, f"{mod}_taxonomy_{taxonomy}")
+        train_subfolder = os.path.join(target_dir, "train")
         
-        # Check if the folder exists AND is not empty
-        if os.path.exists(target_dir) and len(os.listdir(target_dir)) > 0:
-            print(f"[*] Data already extracted for {mod.upper()}. Skipping extraction. (Found at {target_dir})")
+        # Check if the 'train' subfolder exists and has files inside it
+        if os.path.exists(train_subfolder) and len(os.listdir(train_subfolder)) > 0:
+            print(f"[*] Pre-split data already exists for {mod.upper()}. Skipping extraction. (Found at {target_dir})")
             continue
+            
+        print(f"[*] No existing splits found for {mod.upper()}. Starting extraction & splitting...")
         
         loader.extract_and_save_tiles(
             save_base_dir=save_tile_ds_dir, 

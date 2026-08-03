@@ -180,11 +180,22 @@ class H2Crop:
         
         return save_file_path
 
-    def extract_and_save_tiles(self, save_base_dir, modality="hyperspectral", taxonomy=3, patch_size=32, max_files=None):
+    def extract_and_save_tiles(self, save_base_dir, modality="hyperspectral", taxonomy=3, patch_size=32, max_files=None, min_train_tiles_threshold=0):
         """
         Iterates through the h5_data directory, extracts spatial patches,
-        calculates the predominant class for each, and saves them to disk.
-        After extraction, it organizes them into Train/Val/Test folders.
+        calculates the predominant class for each, and saves them temporarily.
+        Triggers per-class splitting, filtering, and organization.
+        
+        Parameters:
+        - save_base_dir: string, base directory to save the extracted tiles
+        - modality: string, "hyperspectral" or "multispectral"
+        - taxonomy: int, defines the taxonomy level for labels
+        - patch_size: int, size of square tile
+        - max_files: int or None, limit files for quick testing
+        - min_train_tiles_threshold: int, minimum number of training tiles required to keep a class
+        
+        Returns:
+        - list of int: Sorted list of class IDs that met the threshold and were kept.
         """
         final_save_dir = os.path.join(save_base_dir, f"{modality}_taxonomy_{taxonomy}")
         os.makedirs(final_save_dir, exist_ok=True)
@@ -192,14 +203,14 @@ class H2Crop:
         h5_files = [f for f in os.listdir(self.h5_dir) if f.endswith('.h5')]
         if not h5_files:
             print(f"[Warning] No .h5 files found in {self.h5_dir}")
-            return
+            return []
         
         print(f"Found {len(h5_files)} images in {self.h5_dir}.")
         print(f"Extracting {patch_size}x{patch_size} tiles to: {final_save_dir}")
         if max_files is not None:
             print(f"[Testing Mode] Execution limited to the first {max_files} files.")
             
-        extracted_file_paths = []
+        class_to_files = {}
         files_processed = 0
         
         for filename in tqdm(h5_files, desc=f"Extracting Tiles ({modality})"):
@@ -212,7 +223,6 @@ class H2Crop:
             
             try:
                 with h5py.File(file_path, 'r') as h5f:
-                    
                     labels_full = np.array(h5f['label'])
                     mask_array = labels_full[taxonomy]
                     
@@ -229,19 +239,23 @@ class H2Crop:
                     
                     _, h, w = image_array.shape
                     
+                    tile_idx = 0
                     for i in range(0, h - patch_size + 1, patch_size):
                         for j in range(0, w - patch_size + 1, patch_size):
-                            
                             img_patch = image_array[:, i:i+patch_size, j:j+patch_size]
                             mask_patch = mask_array[i:i+patch_size, j:j+patch_size]
                             
                             predominant_class = int(mode(mask_patch.flatten(), keepdims=False)[0])
                             
-                            tile_filename = os.path.join(final_save_dir, f"{sample_id}_tile_{i}_{j}.npz")
+                            # Save temporarily in the base directory
+                            tile_filename = os.path.join(final_save_dir, f"{sample_id}_tile_{tile_idx}.npz")
                             np.savez_compressed(tile_filename, X=img_patch, y=predominant_class)
                             
-                            # Track the saved file
-                            extracted_file_paths.append(tile_filename)
+                            if predominant_class not in class_to_files:
+                                class_to_files[predominant_class] = []
+                            class_to_files[predominant_class].append(tile_filename)
+                            
+                            tile_idx += 1
                             
                 files_processed += 1
                             
@@ -249,47 +263,83 @@ class H2Crop:
                 print(f"\n[Error] Failed to process {filename}: {str(e)}")
                 continue
                     
-        print(f"\nExtraction complete! {len(extracted_file_paths)} tiles successfully saved.")
+        print(f"\nExtraction complete! Grouped tiles across {len(class_to_files)} classes.")
         
-        # Trigger the physical Train/Val/Test split on the hard drive
-        if extracted_file_paths:
-            self._split_and_move_tiles(extracted_file_paths, final_save_dir)
+        # Trigger per-class split, threshold filtering, and organization
+        kept_classes = self._split_and_move_tiles(class_to_files, final_save_dir, min_train_tiles_threshold)
+        return kept_classes
 
-    def _split_and_move_tiles(self, file_paths, base_dir):
+    def _split_and_move_tiles(self, class_to_files_map, base_dir, min_train_tiles_threshold):
         """
-        Private method to split extracted tiles into train/val/test sets
-        and move them into corresponding subdirectories.
+        Performs a per-class train/val/test split (70/20/10), filters out classes 
+        whose training set size falls below the threshold, deletes discarded files, 
+        and moves valid files into structured subfolders.
         """
-        print(f"\n--- Organizing tiles into Train/Val/Test splits ---")
+        print(f"\n--- Processing per-class splits and applying threshold (min_train={min_train_tiles_threshold}) ---")
         
-        # 1. Split the file paths (70% Train, 20% Val, 10% Test)
-        train_files, test_files = train_test_split(file_paths, test_size=0.10, random_state=42)
-        train_files, val_files = train_test_split(train_files, test_size=(0.20 / 0.90), random_state=42)
+        train_dir = os.path.join(base_dir, "train")
+        val_dir = os.path.join(base_dir, "validation")
+        test_dir = os.path.join(base_dir, "test")
         
-        splits = {
-            "train": train_files,
-            "validation": val_files,
-            "test": test_files
-        }
+        os.makedirs(train_dir, exist_ok=True)
+        os.makedirs(val_dir, exist_ok=True)
+        os.makedirs(test_dir, exist_ok=True)
         
-        # 2. Create subdirectories and move the files
-        for split_name, files in splits.items():
-            split_dir = os.path.join(base_dir, split_name)
-            os.makedirs(split_dir, exist_ok=True)
+        kept_classes = []
+        dropped_classes = []
+        
+        for class_id, file_paths in class_to_files_map.items():
+            total_tiles = len(file_paths)
             
-            moved_count = 0
-            for file_path in files:
-                # Grab just the filename (e.g., sample1_tile_0_0.npz)
-                filename = os.path.basename(file_path)
-                destination = os.path.join(split_dir, filename)
+            # If a class has fewer than 10 tiles overall, it cannot form a valid 70/20/10 split
+            if total_tiles < 10:
+                dropped_classes.append((class_id, total_tiles, "Too few total tiles"))
+                for fp in file_paths:
+                    if os.path.exists(fp):
+                        os.remove(fp)
+                continue
                 
-                # Physically move the file on the hard drive
-                shutil.move(file_path, destination)
-                moved_count += 1
+            # Per-class split: 70% train, 20% val, 10% test
+            try:
+                train_files, test_files = train_test_split(file_paths, test_size=0.10, random_state=42)
+                val_ratio = 0.20 / 0.90
+                train_files, val_files = train_test_split(train_files, test_size=val_ratio, random_state=42)
+            except Exception as e:
+                dropped_classes.append((class_id, total_tiles, f"Split error: {str(e)}"))
+                for fp in file_paths:
+                    if os.path.exists(fp):
+                        os.remove(fp)
+                continue
                 
-            print(f" -> Moved {moved_count} tiles to {split_dir}")
+            # Apply training set threshold filter
+            if len(train_files) < min_train_tiles_threshold:
+                dropped_classes.append((class_id, len(train_files), f"Below train threshold ({min_train_tiles_threshold})"))
+                for fp in file_paths:
+                    if os.path.exists(fp):
+                        os.remove(fp)
+                continue
+                
+            kept_classes.append(class_id)
             
-        print("Data splitting and folder organization complete!")
+            # Move files to their respective split directories
+            def move_files(files, target_subfolder):
+                for fp in files:
+                    filename = os.path.basename(fp)
+                    dest = os.path.join(target_subfolder, filename)
+                    shutil.move(fp, dest)
+                    
+            move_files(train_files, train_dir)
+            move_files(val_files, val_dir)
+            move_files(test_files, test_dir)
+            
+        print(f" -> Kept {len(kept_classes)} classes meeting the threshold.")
+        print(f" -> Dropped {len(dropped_classes)} rare classes.")
+        for dc in dropped_classes[:5]:
+            print(f"    - Class {dc[0]}: {dc[1]} training tiles ({dc[2]})+")
+        if len(dropped_classes) > 5:
+            print(f"    - ... and {len(dropped_classes) - 5} more.")
+            
+        return sorted(kept_classes)
 
     def get_file_list(self, from_train, limit, path=None):
         """
