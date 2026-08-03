@@ -180,7 +180,7 @@ class H2Crop:
         
         return save_file_path
 
-    def extract_and_save_tiles(self, save_base_dir, modality="hyperspectral", taxonomy=3, patch_size=32, max_files=None, min_train_tiles_threshold=0):
+    def extract_and_save_tiles(self, save_base_dir, modality="hyperspectral", taxonomy=3, patch_size=32, max_files=None, min_train_tiles_threshold=20):
         """
         Iterates through the h5_data directory, extracts spatial patches,
         calculates the predominant class for each, and saves them temporarily.
