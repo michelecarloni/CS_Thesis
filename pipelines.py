@@ -1,6 +1,8 @@
 import os
 import json
 import gc
+import copy
+import glob
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -14,15 +16,13 @@ from sklearn.metrics import classification_report, confusion_matrix, accuracy_sc
 from utils import load_hyperspectral_dataset, normalize_features
 from H2Crop.data_structures import h2crop_taxonomy_dict
 from H2Crop.H2CropTileDataset import H2CropTileDataset
-from hyperparameter_tuning import optimize_hyperparameters
+from hyperparameter_tuning import optimize_hyperparameters, optimize_cnn_hyperparameters
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 import pandas as pd
 import cupy as cp
-from models.resnet18 import ResNet18
-from models.resnet50 import ResNet50
 
 """
 Pipeline called for the first experiment (First Baseline):
@@ -369,60 +369,113 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, data_path, modality, deta
 
 
 
-def pipeline_H2Crop_CNN(model, tiles_dir, modality, batch_size=32, epochs=10, use_gpu=True):
+def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size=32, n_trials=10, epochs_per_trial=5, use_gpu=True):
     """
-    Trains a pre-instantiated CNN on extracted image tiles.
+    Trains a pre-instantiated CNN with Train/Val/Test splits.
+    Delegates tuning to an external script, then evaluates and saves reports.
     """
-    # Access the name directly from the model object you attached
     model_name = getattr(model, 'name', 'Unknown_CNN_Model')
     
-    print(f"\n{'='*60}")
+    print(f"\n{'='*70}")
     print(f"STARTING CNN PIPELINE FOR: {modality.upper()} | Model: {model_name}")
-    print(f"{'='*60}")
-    
-    # 1. Setup the Streaming DataLoader
-    dataset = H2CropTileDataset(tiles_dir)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4)
-    print(f"Loaded {len(dataset)} tiles from disk. Batches per epoch: {len(dataloader)}")
-    
-    # 2. Initialize Loss and Optimizer
-    # We pass the pre-instantiated model's parameters directly to the optimizer
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
-    
-    # 3. Training Loop
-    print("\nStarting Training...")
-    for epoch in range(epochs):
-        # Because your wrapper inherits from nn.Module, calling .train() cascades to the inner model
-        model.train() 
-        running_loss = 0.0
+    print(f"{'='*70}")
+
+    algo_dir = os.path.join(save_results_dir, modality, model_name)
+    os.makedirs(algo_dir, exist_ok=True)
+
+    # 1. Train/Val/Test Split (70 / 20 / 10)
+    all_files = glob.glob(os.path.join(tiles_dir, "*.npz"))
+    if not all_files:
+        raise ValueError(f"No .npz files found in {tiles_dir}")
         
-        for batch_idx, (batch_X, batch_y) in enumerate(dataloader):
-            # Push batch to GPU
+    train_files, test_files = train_test_split(all_files, test_size=0.10, random_state=42)
+    train_files, val_files = train_test_split(train_files, test_size=(0.20 / 0.90), random_state=42)
+    
+    print(f"Dataset Split: Train ({len(train_files)}), Val ({len(val_files)}), Test ({len(test_files)})")
+    
+    # 2. Setup DataLoaders
+    train_loader = DataLoader(H2CropTileDataset(train_files), batch_size=batch_size, shuffle=True, num_workers=4)
+    val_loader = DataLoader(H2CropTileDataset(val_files), batch_size=batch_size, shuffle=False, num_workers=4)
+    test_loader = DataLoader(H2CropTileDataset(test_files), batch_size=batch_size, shuffle=False, num_workers=4)
+
+    # 3. Save the initial "blank slate" weights of the model
+    initial_model_state = copy.deepcopy(model.state_dict())
+
+    # 4. Call external Optuna tuner
+    best_params = optimize_cnn_hyperparameters(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        initial_model_state=initial_model_state,
+        n_trials=n_trials,
+        epochs_per_trial=epochs_per_trial,
+        use_gpu=use_gpu
+    )
+
+    # 5. Final Retraining on Train Set with Best Parameters
+    print("\n--- Retraining with Best Parameters for Final Evaluation ---")
+    model.load_state_dict(copy.deepcopy(initial_model_state))
+    
+    if best_params["optimizer"] == "Adam":
+        optimizer = optim.Adam(model.parameters(), lr=best_params["lr"], weight_decay=best_params["weight_decay"])
+    else:
+        optimizer = optim.SGD(model.parameters(), lr=best_params["lr"], momentum=0.9, weight_decay=best_params["weight_decay"])
+        
+    criterion = nn.CrossEntropyLoss()
+    
+    for epoch in range(epochs_per_trial):
+        model.train()
+        for batch_X, batch_y in train_loader:
             if use_gpu and torch.cuda.is_available():
                 batch_X, batch_y = batch_X.cuda(), batch_y.cuda()
-                
             optimizer.zero_grad()
-            
-            # Forward pass
-            outputs = model(batch_X)
-            loss = criterion(outputs, batch_y)
-            
-            # Backward pass and optimize
+            loss = criterion(model(batch_X), batch_y)
             loss.backward()
             optimizer.step()
             
-            running_loss += loss.item()
+    # 6. Final Evaluation on Test Set
+    model.eval()
+    all_preds, all_targets = [], []
+    with torch.no_grad():
+        for batch_X, batch_y in test_loader:
+            if use_gpu and torch.cuda.is_available():
+                batch_X, batch_y = batch_X.cuda(), batch_y.cuda()
+            outputs = model(batch_X)
+            _, predicted = torch.max(outputs.data, 1)
             
-            if (batch_idx + 1) % 50 == 0:
-                print(f"    Epoch [{epoch+1}/{epochs}], Step [{batch_idx+1}/{len(dataloader)}], Loss: {loss.item():.4f}")
-                
-        epoch_loss = running_loss / len(dataloader)
-        print(f"==> Epoch {epoch+1} Completed | Average Loss: {epoch_loss:.4f}\n")
+            all_preds.extend(predicted.cpu().numpy())
+            all_targets.extend(batch_y.cpu().numpy())
+            
+    # 7. Save Report and Confusion Matrix
+    print(f"\n--- Saving Results to {algo_dir} ---")
+    
+    unique_classes = np.unique(all_targets)
+    target_names = [f"Class {c}" for c in unique_classes]
+    
+    report_path = os.path.join(algo_dir, "performance.txt")
+    report = classification_report(all_targets, all_preds, zero_division=0, target_names=target_names)
+    
+    with open(report_path, "w") as f:
+        f.write(f"--- Best Optuna Hyperparameters ---\n")
+        f.write(json.dumps(best_params, indent=4))
+        f.write(f"\n\n--- Test Set Classification Report ---\n")
+        f.write(report)
         
-        # Empty GPU cache between epochs to prevent VRAM fragmentation
-        if use_gpu:
-            torch.cuda.empty_cache()
-            
-    print("Training Complete!")
+    matrix_path = os.path.join(algo_dir, "confusion_matrix.png")
+    fig_size = max(10, len(unique_classes) * 0.4)
+    fig, ax = plt.subplots(figsize=(fig_size, fig_size * 0.8))
+    
+    ConfusionMatrixDisplay.from_predictions(
+        all_targets, all_preds, ax=ax, cmap='Blues', colorbar=False, display_labels=target_names
+    )
+    
+    plt.title(f"Confusion Matrix: {model_name}\n({modality} | Tuned via Optuna)")
+    plt.xticks(rotation=45, ha='right', fontsize=9)
+    plt.yticks(fontsize=9)
+    plt.tight_layout()
+    plt.savefig(matrix_path, dpi=300)
+    plt.close(fig)
+    
+    print("Training Complete! All reports saved.")
+    
     return model
