@@ -1,8 +1,0 @@
---- H2Crop ML Pipeline Configuration ---
-modality: multispectral
-num_files_processed: 300
-detail_layer: 0
-static: True
-keep_prior: False
-total_samples (balancing target): 150000
-classes_to_drop: [0, 3]

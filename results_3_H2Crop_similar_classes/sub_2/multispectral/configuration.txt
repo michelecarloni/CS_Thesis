@@ -1,7 +1,0 @@
---- H2Crop ML Pipeline Configuration ---
-modality: multispectral
-detail_layer: 3
-data_path: ../results_3_H2Crop_similar_classes/sub_2/multispectral_extracted_pixels.npz
-total_samples: 50000
-use_gpu: True
-tuning: Optuna TPESampler
