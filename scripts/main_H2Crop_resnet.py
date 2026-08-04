@@ -12,6 +12,9 @@ from pipelines import pipeline_H2Crop_CNN
 from models.resnet18 import ResNet18
 from models.resnet50 import ResNet50
 
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+
 if __name__ == "__main__":
     modality = ["hyperspectral", "multispectral"]
     taxonomy = 3
@@ -80,7 +83,7 @@ if __name__ == "__main__":
                 modality=mod,
                 batch_size=32,       
                 n_trials=10,         
-                epochs_per_trial=5,
+                epochs_per_trial=1,
                 final_epochs=20,
                 use_gpu=True
             )

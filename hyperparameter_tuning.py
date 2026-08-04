@@ -138,7 +138,6 @@ def optimize_cnn_hyperparameters(model, train_loader, val_loader, initial_model_
             optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=weight_decay)
             
         criterion = nn.CrossEntropyLoss()
-        scaler = torch.amp.GradScaler('cuda')
         
         for epoch in range(epochs_per_trial):
             model.train()
@@ -156,26 +155,24 @@ def optimize_cnn_hyperparameters(model, train_loader, val_loader, initial_model_
 
                 optimizer.zero_grad()
                 
-                # --- AMP DISABLED: Standard 32-bit Forward Pass ---
+                # AMP DISABLED: Standard 32-bit Forward Pass (Improved with TF32)
                 outputs = model(batch_X)
                 loss = criterion(outputs, batch_y)
-                # --------------------------------------------------
-                
-                # --- Standard 32-bit Backward Pass ---
+                                
+                # Standard 32-bit Backward Pass
                 loss.backward()
                 
                 # Keep gradient clipping to prevent optimizer explosions
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 
                 optimizer.step()
-                # -------------------------------------
                 
                 train_loop.set_postfix(loss=loss.item())
                 
             model.eval()
             correct, total = 0, 0
             
-            # --- Added TQDM Progress Bar for Validation ---
+            # Add TQDM progress bar
             val_loop = tqdm(val_loader, desc=f"Trial {trial.number} | Epoch {epoch+1}/{epochs_per_trial} [Val]", leave=False)
             
             with torch.no_grad():

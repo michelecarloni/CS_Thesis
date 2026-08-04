@@ -445,9 +445,6 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
     train_losses = []
     val_losses = []
     
-    # Initialize AMP GradScaler using the updated PyTorch 2.4+ syntax
-    scaler = torch.amp.GradScaler('cuda')
-    
     for epoch in range(final_epochs):
         model.train()
         running_train_loss = 0.0
@@ -458,11 +455,11 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
                 
             optimizer.zero_grad()
             
-            # --- AMP DISABLED: Standard 32-bit Forward Pass ---
+            # AMP DISABLED: Standard 32-bit Forward Pass (Improved with TF32)
             outputs = model(batch_X)
             loss = criterion(outputs, batch_y)
             
-            # --- Standard 32-bit Backward Pass ---
+            # Standard 32-bit Backward Pass
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
