@@ -128,7 +128,7 @@ def optimize_cnn_hyperparameters(model, train_loader, val_loader, initial_model_
     def objective(trial):
         model.load_state_dict(copy.deepcopy(initial_model_state))
         
-        lr = trial.suggest_float("lr", 1e-5, 1e-2, log=True)
+        lr = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
         optimizer_name = trial.suggest_categorical("optimizer", ["Adam", "SGD"])
         weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-2, log=True)
         
