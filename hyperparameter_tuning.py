@@ -150,23 +150,26 @@ def optimize_cnn_hyperparameters(model, train_loader, val_loader, initial_model_
                 if use_gpu and torch.cuda.is_available():
                     batch_X, batch_y = batch_X.cuda(), batch_y.cuda()
                     
+                # Keep the input trap just as a best practice!
+                if torch.isnan(batch_X).any() or torch.isinf(batch_X).any():
+                    continue  
+
                 optimizer.zero_grad()
                 
-                with torch.autocast(device_type='cuda', dtype=torch.float16):
-                    outputs = model(batch_X)
-                    loss = criterion(outputs, batch_y)
-                    
-                scaler.scale(loss).backward()
-
-                # Unscale the gradients before clipping
-                scaler.unscale_(optimizer)
-                # Clip gradients to a maximum norm of 1.0 to prevent explosion
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-               
-                scaler.step(optimizer)
-                scaler.update()
+                # --- AMP DISABLED: Standard 32-bit Forward Pass ---
+                outputs = model(batch_X)
+                loss = criterion(outputs, batch_y)
+                # --------------------------------------------------
                 
-                # Update progress bar with the current loss
+                # --- Standard 32-bit Backward Pass ---
+                loss.backward()
+                
+                # Keep gradient clipping to prevent optimizer explosions
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                
+                optimizer.step()
+                # -------------------------------------
+                
                 train_loop.set_postfix(loss=loss.item())
                 
             model.eval()

@@ -458,20 +458,14 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
                 
             optimizer.zero_grad()
             
-            # Use Automatic Mixed Precision (AMP)
-            with torch.autocast(device_type='cuda', dtype=torch.float16):
-                outputs = model(batch_X)
-                loss = criterion(outputs, batch_y)
-                                
-            scaler.scale(loss).backward()
+            # --- AMP DISABLED: Standard 32-bit Forward Pass ---
+            outputs = model(batch_X)
+            loss = criterion(outputs, batch_y)
             
-            # Unscale the gradients before clipping
-            scaler.unscale_(optimizer)
-            # Clip gradients to a maximum norm of 1.0 to prevent explosion
+            # --- Standard 32-bit Backward Pass ---
+            loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                           
-            scaler.step(optimizer)
-            scaler.update()
+            optimizer.step()
             
             running_train_loss += loss.item() * batch_X.size(0)
             
