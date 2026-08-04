@@ -82,7 +82,7 @@ if __name__ == "__main__":
                 save_results_dir=save_results_dir,
                 modality=mod,
                 batch_size=32,       
-                n_trials=10,         
+                n_trials=2,         
                 epochs_per_trial=1,
                 final_epochs=20,
                 use_gpu=True

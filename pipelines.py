@@ -373,9 +373,10 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
     """
     Trains a pre-instantiated CNN using pre-split train/val/test folders.
     Delegates tuning to an external script using a 20% data subset for speed, 
-    then evaluates and saves reports/checkpoints using Mixed Precision (AMP).
+    then evaluates and saves reports/checkpoints using standard FP32 math and tqdm.
     """
     import random
+    from tqdm import tqdm
     
     model_name = getattr(model, 'name', 'Unknown_CNN_Model')
     
@@ -449,9 +450,16 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
         model.train()
         running_train_loss = 0.0
         
-        for batch_X, batch_y in train_loader:
+        # TQDM Train Loop
+        train_loop = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{final_epochs}] [Train]", leave=False)
+        
+        for batch_X, batch_y in train_loop:
             if use_gpu and torch.cuda.is_available():
                 batch_X, batch_y = batch_X.cuda(), batch_y.cuda()
+                
+            # Input trap to catch bad data
+            if torch.isnan(batch_X).any() or torch.isinf(batch_X).any():
+                continue
                 
             optimizer.zero_grad()
             
@@ -465,6 +473,7 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
             optimizer.step()
             
             running_train_loss += loss.item() * batch_X.size(0)
+            train_loop.set_postfix(loss=loss.item())
             
         epoch_train_loss = running_train_loss / len(train_loader.dataset)
         train_losses.append(epoch_train_loss)
@@ -472,8 +481,11 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
         model.eval()
         running_val_loss = 0.0
         
+        # TQDM Validation Loop
+        val_loop = tqdm(val_loader, desc=f"Epoch [{epoch+1}/{final_epochs}] [Val]", leave=False)
+        
         with torch.no_grad():
-            for batch_X, batch_y in val_loader:
+            for batch_X, batch_y in val_loop:
                 if use_gpu and torch.cuda.is_available():
                     batch_X, batch_y = batch_X.cuda(), batch_y.cuda()
                     
@@ -484,6 +496,7 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
         epoch_val_loss = running_val_loss / len(val_loader.dataset)
         val_losses.append(epoch_val_loss)
         
+        # This prints a clean summary after the tqdm bars disappear
         print(f"    Epoch [{epoch+1}/{final_epochs}] | Train Loss: {epoch_train_loss:.4f} | Val Loss: {epoch_val_loss:.4f}")
         
         ckpt_path = os.path.join(checkpoint_dir, f"epoch_{epoch+1}.pt")
@@ -506,12 +519,18 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
     # =================================================================
     # 7. Final Evaluation on Test Set
     # =================================================================
+    print("\n--- Evaluating on Test Set ---")
     model.eval()
     all_preds, all_targets = [], []
+    
+    # TQDM Test Loop
+    test_loop = tqdm(test_loader, desc="Testing", leave=False)
+    
     with torch.no_grad():
-        for batch_X, batch_y in test_loader:
+        for batch_X, batch_y in test_loop:
             if use_gpu and torch.cuda.is_available():
                 batch_X, batch_y = batch_X.cuda(), batch_y.cuda()
+                
             outputs = model(batch_X)
             _, predicted = torch.max(outputs.data, 1)
             
