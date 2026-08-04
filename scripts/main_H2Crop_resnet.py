@@ -80,7 +80,8 @@ if __name__ == "__main__":
                 modality=mod,
                 batch_size=32,       
                 n_trials=10,         
-                epochs_per_trial=20,
+                epochs_per_trial=5,
+                final_epochs=20,
                 use_gpu=True
             )
             

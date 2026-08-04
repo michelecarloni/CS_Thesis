@@ -121,52 +121,62 @@ def _build_model(model_name, params, random_state):
 # For models that works with a Convolutional layer
 def optimize_cnn_hyperparameters(model, train_loader, val_loader, initial_model_state, n_trials=10, epochs_per_trial=5, use_gpu=True):
     """
-    Optuna optimization logic for PyTorch CNNs utilizing Mixed Precision (AMP).
-    Returns the best hyperparameters found during the study.
+    Optuna optimization logic for PyTorch CNNs utilizing Mixed Precision (AMP) and tqdm.
     """
+    from tqdm import tqdm 
+    
     def objective(trial):
-        # Reset model to its pristine initial state before each trial
         model.load_state_dict(copy.deepcopy(initial_model_state))
         
-        # Define the hyperparameter search space
         lr = trial.suggest_float("lr", 1e-5, 1e-2, log=True)
         optimizer_name = trial.suggest_categorical("optimizer", ["Adam", "SGD"])
         weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-2, log=True)
         
-        # Initialize optimizer based on Optuna's suggestion
         if optimizer_name == "Adam":
             optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
         else:
             optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=weight_decay)
             
         criterion = nn.CrossEntropyLoss()
-        
-        # Initialize AMP GradScaler for faster tuning
         scaler = torch.amp.GradScaler('cuda')
         
-        # Training Loop
         for epoch in range(epochs_per_trial):
             model.train()
-            for batch_X, batch_y in train_loader:
+            
+            # --- Added TQDM Progress Bar for Training ---
+            train_loop = tqdm(train_loader, desc=f"Trial {trial.number} | Epoch {epoch+1}/{epochs_per_trial} [Train]", leave=False)
+            
+            for batch_X, batch_y in train_loop:
                 if use_gpu and torch.cuda.is_available():
                     batch_X, batch_y = batch_X.cuda(), batch_y.cuda()
                     
                 optimizer.zero_grad()
                 
-                # Use Automatic Mixed Precision (AMP)
                 with torch.autocast(device_type='cuda', dtype=torch.float16):
                     outputs = model(batch_X)
                     loss = criterion(outputs, batch_y)
                     
                 scaler.scale(loss).backward()
+
+                # Unscale the gradients before clipping
+                scaler.unscale_(optimizer)
+                # Clip gradients to a maximum norm of 1.0 to prevent explosion
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+               
                 scaler.step(optimizer)
                 scaler.update()
                 
-            # Validation Loop
+                # Update progress bar with the current loss
+                train_loop.set_postfix(loss=loss.item())
+                
             model.eval()
             correct, total = 0, 0
+            
+            # --- Added TQDM Progress Bar for Validation ---
+            val_loop = tqdm(val_loader, desc=f"Trial {trial.number} | Epoch {epoch+1}/{epochs_per_trial} [Val]", leave=False)
+            
             with torch.no_grad():
-                for batch_X, batch_y in val_loader:
+                for batch_X, batch_y in val_loop:
                     if use_gpu and torch.cuda.is_available():
                         batch_X, batch_y = batch_X.cuda(), batch_y.cuda()
                         
@@ -177,7 +187,6 @@ def optimize_cnn_hyperparameters(model, train_loader, val_loader, initial_model_
                     
             val_accuracy = correct / total
             
-            # Prune unpromising trials early
             trial.report(val_accuracy, epoch)
             if trial.should_prune():
                 raise optuna.exceptions.TrialPruned()

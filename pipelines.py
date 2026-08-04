@@ -369,7 +369,7 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, data_path, modality, deta
 
 
 
-def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size=32, n_trials=10, epochs_per_trial=5, use_gpu=True):
+def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size=32, n_trials=10, epochs_per_trial=5, final_epochs=20, use_gpu=True):
     """
     Trains a pre-instantiated CNN using pre-split train/val/test folders.
     Delegates tuning to an external script using a 20% data subset for speed, 
@@ -427,9 +427,9 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
     )
 
     # =================================================================
-    # 6. Final Retraining with Best Parameters (Checkpointing Added)
+    # 6. Final Retraining on 100% of Data with Best Parameters
     # =================================================================
-    print("\n--- Retraining on 100% of Data with Best Parameters ---")
+    print(f"\n--- Retraining on 100% of Data for {final_epochs} Epochs ---")
     model.load_state_dict(copy.deepcopy(initial_model_state))
     
     if best_params["optimizer"] == "Adam":
@@ -445,10 +445,10 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
     train_losses = []
     val_losses = []
     
-    # Initialize AMP GradScaler
+    # Initialize AMP GradScaler using the updated PyTorch 2.4+ syntax
     scaler = torch.amp.GradScaler('cuda')
     
-    for epoch in range(epochs_per_trial):
+    for epoch in range(final_epochs):
         model.train()
         running_train_loss = 0.0
         
@@ -458,12 +458,18 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
                 
             optimizer.zero_grad()
             
-            # Use Automatic Mixed Precision (AMP) for speed
+            # Use Automatic Mixed Precision (AMP)
             with torch.autocast(device_type='cuda', dtype=torch.float16):
                 outputs = model(batch_X)
                 loss = criterion(outputs, batch_y)
-                
+                                
             scaler.scale(loss).backward()
+            
+            # Unscale the gradients before clipping
+            scaler.unscale_(optimizer)
+            # Clip gradients to a maximum norm of 1.0 to prevent explosion
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                           
             scaler.step(optimizer)
             scaler.update()
             
@@ -487,15 +493,15 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
         epoch_val_loss = running_val_loss / len(val_loader.dataset)
         val_losses.append(epoch_val_loss)
         
-        print(f"    Epoch [{epoch+1}/{epochs_per_trial}] | Train Loss: {epoch_train_loss:.4f} | Val Loss: {epoch_val_loss:.4f}")
+        print(f"    Epoch [{epoch+1}/{final_epochs}] | Train Loss: {epoch_train_loss:.4f} | Val Loss: {epoch_val_loss:.4f}")
         
         ckpt_path = os.path.join(checkpoint_dir, f"epoch_{epoch+1}.pt")
         torch.save(model.state_dict(), ckpt_path)
 
     plot_path = os.path.join(checkpoint_dir, "loss_curve.png")
     fig, ax = plt.subplots(figsize=(8, 6))
-    ax.plot(range(1, epochs_per_trial + 1), train_losses, label='Training Loss', marker='o')
-    ax.plot(range(1, epochs_per_trial + 1), val_losses, label='Validation Loss', marker='o')
+    ax.plot(range(1, final_epochs + 1), train_losses, label='Training Loss', marker='o')
+    ax.plot(range(1, final_epochs + 1), val_losses, label='Validation Loss', marker='o')
     ax.set_title(f"Loss Curve: {model_name} ({modality.capitalize()})")
     ax.set_xlabel("Epochs")
     ax.set_ylabel("Loss")
@@ -504,7 +510,7 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
     plt.tight_layout()
     plt.savefig(plot_path, dpi=300)
     plt.close(fig)
-    print(f"-> Saved {epochs_per_trial} checkpoints and loss curve to {checkpoint_dir}")
+    print(f"-> Saved {final_epochs} checkpoints and loss curve to {checkpoint_dir}")
             
     # =================================================================
     # 7. Final Evaluation on Test Set
