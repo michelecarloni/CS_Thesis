@@ -446,7 +446,7 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
     val_losses = []
     
     # Initialize AMP GradScaler
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.amp.GradScaler('cuda')
     
     for epoch in range(epochs_per_trial):
         model.train()

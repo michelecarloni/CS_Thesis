@@ -142,7 +142,7 @@ def optimize_cnn_hyperparameters(model, train_loader, val_loader, initial_model_
         criterion = nn.CrossEntropyLoss()
         
         # Initialize AMP GradScaler for faster tuning
-        scaler = torch.cuda.amp.GradScaler()
+        scaler = torch.amp.GradScaler('cuda')
         
         # Training Loop
         for epoch in range(epochs_per_trial):
