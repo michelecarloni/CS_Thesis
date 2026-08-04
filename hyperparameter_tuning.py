@@ -121,7 +121,7 @@ def _build_model(model_name, params, random_state):
 # For models that works with a Convolutional layer
 def optimize_cnn_hyperparameters(model, train_loader, val_loader, initial_model_state, n_trials=10, epochs_per_trial=5, use_gpu=True):
     """
-    Optuna optimization logic for PyTorch CNNs.
+    Optuna optimization logic for PyTorch CNNs utilizing Mixed Precision (AMP).
     Returns the best hyperparameters found during the study.
     """
     def objective(trial):
@@ -141,6 +141,9 @@ def optimize_cnn_hyperparameters(model, train_loader, val_loader, initial_model_
             
         criterion = nn.CrossEntropyLoss()
         
+        # Initialize AMP GradScaler for faster tuning
+        scaler = torch.cuda.amp.GradScaler()
+        
         # Training Loop
         for epoch in range(epochs_per_trial):
             model.train()
@@ -149,10 +152,15 @@ def optimize_cnn_hyperparameters(model, train_loader, val_loader, initial_model_
                     batch_X, batch_y = batch_X.cuda(), batch_y.cuda()
                     
                 optimizer.zero_grad()
-                outputs = model(batch_X)
-                loss = criterion(outputs, batch_y)
-                loss.backward()
-                optimizer.step()
+                
+                # Use Automatic Mixed Precision (AMP)
+                with torch.autocast(device_type='cuda', dtype=torch.float16):
+                    outputs = model(batch_X)
+                    loss = criterion(outputs, batch_y)
+                    
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
                 
             # Validation Loop
             model.eval()

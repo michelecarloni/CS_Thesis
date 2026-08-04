@@ -372,8 +372,11 @@ def pipeline_H2Crop_standard_ML_algo(save_results_dir, data_path, modality, deta
 def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size=32, n_trials=10, epochs_per_trial=5, use_gpu=True):
     """
     Trains a pre-instantiated CNN using pre-split train/val/test folders.
-    Delegates tuning to an external script, then evaluates and saves reports/checkpoints.
+    Delegates tuning to an external script using a 20% data subset for speed, 
+    then evaluates and saves reports/checkpoints using Mixed Precision (AMP).
     """
+    import random
+    
     model_name = getattr(model, 'name', 'Unknown_CNN_Model')
     
     print(f"\n{'='*70}")
@@ -397,18 +400,25 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
         
     print(f"Dataset Split Loaded: Train ({len(train_files)}), Val ({len(val_files)}), Test ({len(test_files)})")
     
-    # 2. Setup DataLoaders
-    train_loader = DataLoader(H2CropTileDataset(train_files), batch_size=batch_size, shuffle=True, num_workers=4)
-    val_loader = DataLoader(H2CropTileDataset(val_files), batch_size=batch_size, shuffle=False, num_workers=4)
-    test_loader = DataLoader(H2CropTileDataset(test_files), batch_size=batch_size, shuffle=False, num_workers=4)
+    # 2. Setup DataLoaders (Optimized with pin_memory=True for faster I/O)
+    train_loader = DataLoader(H2CropTileDataset(train_files), batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
+    val_loader = DataLoader(H2CropTileDataset(val_files), batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
+    test_loader = DataLoader(H2CropTileDataset(test_files), batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
-    # 3. Save the initial "blank slate" weights of the model
+    # 3. Create a smaller 20% subset strictly for Optuna to speed up tuning
+    tune_sample_size = max(1, int(len(train_files) * 0.20))
+    tune_train_files = random.sample(train_files, tune_sample_size)
+    tune_train_loader = DataLoader(H2CropTileDataset(tune_train_files), batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
+
+    print(f"\n[Optimization] Using {tune_sample_size} tiles (20%) for Hyperparameter Tuning.")
+
+    # 4. Save the initial "blank slate" weights of the model
     initial_model_state = copy.deepcopy(model.state_dict())
 
-    # 4. Call external Optuna tuner
+    # 5. Call external Optuna tuner with the tuned subset
     best_params = optimize_cnn_hyperparameters(
         model=model,
-        train_loader=train_loader,
+        train_loader=tune_train_loader,
         val_loader=val_loader,
         initial_model_state=initial_model_state,
         n_trials=n_trials,
@@ -417,9 +427,9 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
     )
 
     # =================================================================
-    # 5. Final Retraining with Best Parameters (Checkpointing Added)
+    # 6. Final Retraining with Best Parameters (Checkpointing Added)
     # =================================================================
-    print("\n--- Retraining with Best Parameters for Final Evaluation ---")
+    print("\n--- Retraining on 100% of Data with Best Parameters ---")
     model.load_state_dict(copy.deepcopy(initial_model_state))
     
     if best_params["optimizer"] == "Adam":
@@ -435,6 +445,9 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
     train_losses = []
     val_losses = []
     
+    # Initialize AMP GradScaler
+    scaler = torch.cuda.amp.GradScaler()
+    
     for epoch in range(epochs_per_trial):
         model.train()
         running_train_loss = 0.0
@@ -444,10 +457,15 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
                 batch_X, batch_y = batch_X.cuda(), batch_y.cuda()
                 
             optimizer.zero_grad()
-            outputs = model(batch_X)
-            loss = criterion(outputs, batch_y)
-            loss.backward()
-            optimizer.step()
+            
+            # Use Automatic Mixed Precision (AMP) for speed
+            with torch.autocast(device_type='cuda', dtype=torch.float16):
+                outputs = model(batch_X)
+                loss = criterion(outputs, batch_y)
+                
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             
             running_train_loss += loss.item() * batch_X.size(0)
             
@@ -489,7 +507,7 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
     print(f"-> Saved {epochs_per_trial} checkpoints and loss curve to {checkpoint_dir}")
             
     # =================================================================
-    # 6. Final Evaluation on Test Set
+    # 7. Final Evaluation on Test Set
     # =================================================================
     model.eval()
     all_preds, all_targets = [], []
@@ -504,7 +522,7 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
             all_targets.extend(batch_y.cpu().numpy())
             
     # =================================================================
-    # 7. Save Report and Confusion Matrix
+    # 8. Save Report and Confusion Matrix
     # =================================================================
     print(f"\n--- Saving Results to {algo_dir} ---")
     
