@@ -51,6 +51,7 @@ if __name__ == "__main__":
             modality=mod, 
             taxonomy=taxonomy, 
             patch_size=32,
+            min_train_tiles_threshold=10000
         )
 
     # ==========================================
