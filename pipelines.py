@@ -789,69 +789,66 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
 # - training the first 4 standard ML models over the tiles
 # - Train
 
-def pipeline_H2Crop_standard_ML_algo_tiles(save_results_dir, dataset_dir, subset_id, modality, taxonomy=3, patch_size=32, use_gpu=True):
+def pipeline_H2Crop_standard_ML_algo_tiles(save_results_dir, dataset_dir, subset_id, modality, taxonomy=3, patch_size=32, use_gpu=True, max_train_pixels=1000000, test_batch_size=50):
     """
-    Trains standard ML algorithms pixel-by-pixel on segmentation tiles using fixed hyperparameters.
-    Saves the trained models to a checkpoints directory.
+    Trains ML algorithms using a memory-capped training set and evaluates them using 
+    a batched sequential generator on the test set to prevent OOM crashes.
     """
     print(f"\n{'='*70}")
     print(f"STARTING ML SEGMENTATION PIPELINE FOR: {modality.upper()} | Subset {subset_id}")
     print(f"{'='*70}")
 
-    # Setup directories
     results_out_dir = os.path.join(save_results_dir, "results", modality)
     checkpoints_dir = os.path.join(save_results_dir, "checkpoints")
     os.makedirs(results_out_dir, exist_ok=True)
     os.makedirs(checkpoints_dir, exist_ok=True)
     
-    # 1. Load Data (Skipping Validation to save RAM)
-    print("Loading and flattening Train tiles...")
+    # CAPPED TRAINING LOADING
+    print(f"Loading Train tiles (Capped at {max_train_pixels} pixels)...")
     X_train, y_train = load_and_flatten_segmentation_tiles(os.path.join(dataset_dir, "train"))
     
-    print("Loading and flattening Test tiles...")
-    X_test, y_test = load_and_flatten_segmentation_tiles(os.path.join(dataset_dir, "test"))
-    
-    print(f"Data loaded! Train Pixels: {len(y_train)} | Test Pixels: {len(y_test)}")
+    # Subsample if necessary to protect RAM/VRAM
+    if len(y_train) > max_train_pixels:
+        print(f"Downsampling Train set from {len(y_train)} to {max_train_pixels} pixels...")
+        rng = np.random.default_rng(42)
+        idx = rng.choice(len(y_train), size=max_train_pixels, replace=False)
+        X_train, y_train = X_train[idx], y_train[idx]
 
-    # 2. Scale Features
-    print("Scaling features...")
+    print("Fitting Scaler and scaling Train features...")
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train).astype(np.float32)
-    X_test_scaled = scaler.transform(X_test).astype(np.float32)
-    
     y_train = y_train.astype(np.int32)
-    y_test = y_test.astype(np.int32)
     
-    # Save the scaler so we can use it during future inference if needed
     scaler_filename = f"scaler_tiles_subset_{subset_id}_{modality}_tax_{taxonomy}_pSize_{patch_size}.joblib"
     joblib.dump(scaler, os.path.join(checkpoints_dir, scaler_filename))
     
-    del X_train, X_test
+    del X_train
     gc.collect()
 
-    # 3. Define Fixed Hyperparameter Models
+    # MODEL INITIALIZATION
     models = {}
-    
-    print("Initializing models with fixed hyperparameters...")
-    # Decision Tree (Always CPU)
     models["decision_tree"] = DecisionTreeClassifier(max_depth=20, random_state=42)
     
     if use_gpu:
-        # GPU Models using cuML
         models["random_forest"] = cuRF(n_estimators=150, max_depth=20, max_features='sqrt', random_state=42)
         models["logistic_regression"] = OneVsRestClassifier(estimator=cuMBSGD(loss='log', penalty='l2', alpha=1e-3, epochs=100))
         models["linear_svm"] = OneVsRestClassifier(estimator=cuMBSGD(loss='hinge', penalty='l2', alpha=1e-3, epochs=100))
     else:
-        # Fallback to CPU models if requested 
         models["random_forest"] = RandomForestClassifier(n_estimators=100, max_depth=20, n_jobs=-1, random_state=42)
         models["logistic_regression"] = LogisticRegression(max_iter=1000, n_jobs=-1, random_state=42)
         models["linear_svm"] = LinearSVC(max_iter=1000, dual=False, random_state=42)
 
-    # 4. Training and Evaluation Loop
+    # Establish global classes dynamically from training data
+    subset_classes = np.unique(y_train)
+    taxonomy_key = f'Taxonomy_{taxonomy}'
+    current_taxonomy = h2crop_taxonomy_dict.get(taxonomy_key, {})
+    target_names = [current_taxonomy.get(c, f"Class {c}") if c != 0 else "Background (0)" for c in subset_classes]
+
+    # TRAINING AND BATCHED EVALUATION
+    test_files = glob.glob(os.path.join(dataset_dir, "test", "*.npz"))
+    
     for algo_name, model in models.items():
         print(f"\n--> Training {algo_name}...")
-        
-        # GPU VRAM CLEANUP before each model
         gc.collect()
         if use_gpu:
             try:
@@ -860,42 +857,64 @@ def pipeline_H2Crop_standard_ML_algo_tiles(save_results_dir, dataset_dir, subset
             except Exception:
                 pass
         
-        # Fit the model
+        # Train Model
         model.fit(X_train_scaled, y_train)
         
-        # Save the model to checkpoints folder
         model_filename = f"{algo_name}_tiles_subset_{subset_id}_{modality}_tax_{taxonomy}_pSize_{patch_size}.joblib"
         model_filepath = os.path.join(checkpoints_dir, model_filename)
         joblib.dump(model, model_filepath)
-        print(f"    Saved checkpoint to: {model_filepath}")
         
-        # Evaluate on Test Set
-        print(f"    Evaluating Model on Test Set...")
-        y_pred = model.predict(X_test_scaled)
+        # Batched Test Inference
+        print(f"    Evaluating Model on Test Set in batches of {test_batch_size} tiles...")
+        global_cm = np.zeros((len(subset_classes), len(subset_classes)), dtype=np.int64)
         
+        for i in range(0, len(test_files), test_batch_size):
+            batch_paths = test_files[i:i+test_batch_size]
+            X_batch_list, y_batch_list = [], []
+            
+            for f in batch_paths:
+                data = np.load(f)
+                X_img = data['X'].transpose(1, 2, 0).astype(np.float32)
+                X_batch_list.append(X_img.reshape(-1, X_img.shape[-1]))
+                y_batch_list.append(data['y'].flatten().astype(np.int32))
+                
+            X_batch = np.vstack(X_batch_list)
+            y_batch = np.concatenate(y_batch_list)
+            
+            X_batch_scaled = scaler.transform(X_batch).astype(np.float32)
+            y_pred = model.predict(X_batch_scaled)
+            
+            # Accumulate metrics
+            cm = confusion_matrix(y_batch, y_pred, labels=subset_classes)
+            global_cm += cm
+            
+            del X_batch_list, y_batch_list, X_batch, y_batch, X_batch_scaled, y_pred
+            gc.collect()
+
+        # Reconstruct Dummy Arrays for Classification Report purely from the Confusion Matrix
+        y_true_dummy, y_pred_dummy = [], []
+        for i, true_label in enumerate(subset_classes):
+            for j, pred_label in enumerate(subset_classes):
+                count = global_cm[i, j]
+                if count > 0:
+                    y_true_dummy.extend([true_label] * count)
+                    y_pred_dummy.extend([pred_label] * count)
+                    
         algo_dir = os.path.join(results_out_dir, algo_name)
         os.makedirs(algo_dir, exist_ok=True)
         
-        # Use taxonomy directly
-        taxonomy_key = f'Taxonomy_{taxonomy}'
-        current_taxonomy = h2crop_taxonomy_dict.get(taxonomy_key, {})
-        
-        # Handle taxonomy mapping (0 is Background)
-        unique_classes = np.unique(np.concatenate((y_test, y_pred)))
-        target_names = [current_taxonomy.get(c, f"Class {c}") if c != 0 else "Background (0)" for c in unique_classes]
-        
-        # Generate and Save Classification Report
+        # Generate Report
         report_path = os.path.join(algo_dir, f"performance_subset_{subset_id}.txt")
-        report = classification_report(y_test, y_pred, labels=unique_classes, target_names=target_names, zero_division=0)
+        report = classification_report(y_true_dummy, y_pred_dummy, labels=subset_classes, target_names=target_names, zero_division=0)
         
         with open(report_path, "w") as f:
-            f.write(f"--- Fixed Hyperparameters ---\nAlgorithm: {algo_name}\n\n")
+            f.write(f"--- Batched Inference Complete ---\nAlgorithm: {algo_name}\n\n")
             f.write(f"--- Test Set Classification Report ---\n{report}")
             
-        # Generate and Save Confusion Matrix
+        # Generate Matrix Image
         matrix_path = os.path.join(algo_dir, f"confusion_matrix_subset_{subset_id}.png")
         fig, ax = plt.subplots(figsize=(10, 8))
-        ConfusionMatrixDisplay.from_predictions(y_test, y_pred, labels=unique_classes, ax=ax, cmap='Blues', colorbar=False, display_labels=target_names)
+        ConfusionMatrixDisplay(confusion_matrix=global_cm, display_labels=target_names).plot(ax=ax, cmap='Blues', colorbar=False)
         plt.title(f"Confusion Matrix: {algo_name}\n({modality} | Subset {subset_id} | pSize {patch_size})")
         plt.xticks(rotation=45, ha='right', fontsize=9)
         plt.tight_layout()
