@@ -19,7 +19,7 @@ if __name__ == "__main__":
     modality = ["hyperspectral", "multispectral"]
     taxonomy = 3
     save_tile_ds_dir = "../ds/H2Crop_tiles_ds"
-    save_results_dir = "../results"
+    save_results_dir = "../results_4"
     
     # EXACT channel mapping based on the PyTorch error
     channels_map = {

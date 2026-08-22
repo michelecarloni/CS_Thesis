@@ -341,6 +341,182 @@ class H2Crop:
             
         return sorted(kept_classes)
 
+
+    def extract_and_save_tiles_subset(self, save_base_dir, subset_classes, modality="hyperspectral", taxonomy=3, patch_size=32, max_files=None):
+        """
+        Extracts tiles containing specific subset classes, masks all other pixels to 0 (Background),
+        and delegates splitting to a pixel-balancing algorithm.
+        """
+        final_save_dir = os.path.join(save_base_dir, f"{modality}_taxonomy_{taxonomy}_pSize_{patch_size}")
+        temp_dir = os.path.join(final_save_dir, "temp_all_tiles")
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        h5_files = [f for f in os.listdir(self.h5_dir) if f.endswith('.h5')]
+        if not h5_files:
+            print(f"[Warning] No .h5 files found in {self.h5_dir}")
+            return
+            
+        print(f"\n--- Extracting {patch_size}x{patch_size} Segmentation Tiles ({modality}) ---")
+        print(f"Target Subset Classes: {subset_classes}")
+        print(f"Saving to: {final_save_dir}")
+        
+        tile_stats = [] 
+        files_processed = 0
+        
+        for filename in tqdm(h5_files, desc="Extracting Subset Tiles"):
+            if max_files is not None and files_processed >= max_files:
+                break
+                
+            file_path = os.path.join(self.h5_dir, filename)
+            sample_id = filename.replace('.h5', '')
+            
+            try:
+                with h5py.File(file_path, 'r') as h5f:
+                    labels_full = np.array(h5f['label'])
+                    mask_array = labels_full[taxonomy]
+                    
+                    if modality.lower() == "hyperspectral":
+                        image_array = np.array(h5f['EnMAP_data'])
+                        image_array = self.upsample_hyperspectral(image_array)
+                    elif modality.lower() == "multispectral":
+                        s2_full = np.array(h5f['S2_data'])
+                        month_str = filename[4:6]
+                        s2_time_index = int(month_str) - 1
+                        image_array = s2_full[s2_time_index]
+                    
+                    _, h, w = image_array.shape
+                    
+                    tile_idx = 0
+                    for i in range(0, h - patch_size + 1, patch_size):
+                        for j in range(0, w - patch_size + 1, patch_size):
+                            mask_patch = mask_array[i:i+patch_size, j:j+patch_size].copy()
+                            
+                            # Check if tile has AT LEAST ONE pixel of our target subset
+                            if not np.any(np.isin(mask_patch, subset_classes)):
+                                continue
+                                
+                            # MASKING: Convert any pixel NOT in the subset to 0 (Background)
+                            mask_patch[~np.isin(mask_patch, subset_classes)] = 0
+                            
+                            # Calculate pixel histogram for this specific tile
+                            unique, counts = np.unique(mask_patch, return_counts=True)
+                            hist = dict(zip(unique, counts))
+                            
+                            img_patch = image_array[:, i:i+patch_size, j:j+patch_size]
+                            tile_filename = os.path.join(temp_dir, f"{sample_id}_tile_{tile_idx}.npz")
+                            
+                            np.savez_compressed(tile_filename, X=img_patch, y=mask_patch)
+                            tile_stats.append({'path': tile_filename, 'hist': hist})
+                            
+                            tile_idx += 1
+                            
+                files_processed += 1
+            except Exception as e:
+                print(f"[Error] Failed to process {filename}: {str(e)}")
+                continue
+                
+        print(f"\nExtraction complete! Found {len(tile_stats)} valid tiles containing subset classes.")
+        self._split_balanced_segmentation_tiles(tile_stats, final_save_dir, subset_classes, temp_dir)
+
+
+    def _split_balanced_segmentation_tiles(self, tile_stats, base_dir, subset_classes, temp_dir):
+        """
+        Greedily distributes tiles to Train/Val/Test to ensure the total number of PIXELS
+        per class in Train and Val are perfectly balanced. Remaining valid tiles go to Test.
+        Generates a summary text file in the base_dir.
+        """
+        print("\n--- Balancing Pixels for Segmentation Split ---")
+        
+        train_dir = os.path.join(base_dir, "train")
+        val_dir = os.path.join(base_dir, "validation")
+        test_dir = os.path.join(base_dir, "test")
+        
+        for d in [train_dir, val_dir, test_dir]:
+            os.makedirs(d, exist_ok=True)
+            
+        # 1. Calculate global pixel availability for the subset
+        global_pixel_counts = {c: 0 for c in subset_classes}
+        for stat in tile_stats:
+            for c in subset_classes:
+                global_pixel_counts[c] += stat['hist'].get(c, 0)
+                
+        # 2. Find the bottleneck (the rarest class in the subset)
+        rarest_class = min(global_pixel_counts, key=global_pixel_counts.get)
+        rarest_count = global_pixel_counts[rarest_class]
+        
+        # 3. Define pixel targets based on the rarest class (70% Train, 20% Val)
+        train_target = int(rarest_count * 0.70)
+        val_target   = int(rarest_count * 0.20)
+        
+        current_train = {c: 0 for c in subset_classes}
+        current_val   = {c: 0 for c in subset_classes}
+        
+        tiles_train = 0
+        tiles_val = 0
+        tiles_test = 0
+        
+        import random
+        random.seed(42)
+        random.shuffle(tile_stats) # Shuffle to prevent spatial bias
+        
+        # 4. Greedy Allocation Loop
+        for stat in tqdm(tile_stats, desc="Routing Tiles"):
+            filepath = stat['path']
+            hist = stat['hist']
+            filename = os.path.basename(filepath)
+            
+            # Check if this tile fits in TRAIN without overflowing any subset class target
+            fits_in_train = all(current_train[c] + hist.get(c, 0) <= train_target for c in subset_classes)
+            
+            if fits_in_train:
+                for c in subset_classes:
+                    current_train[c] += hist.get(c, 0)
+                shutil.move(filepath, os.path.join(train_dir, filename))
+                tiles_train += 1
+                continue
+                
+            # Check if this tile fits in VAL without overflowing any subset class target
+            fits_in_val = all(current_val[c] + hist.get(c, 0) <= val_target for c in subset_classes)
+            
+            if fits_in_val:
+                for c in subset_classes:
+                    current_val[c] += hist.get(c, 0)
+                shutil.move(filepath, os.path.join(val_dir, filename))
+                tiles_val += 1
+                continue
+                
+            # If it overflows both, dump it into the unbalanced TEST set
+            shutil.move(filepath, os.path.join(test_dir, filename))
+            tiles_test += 1
+            
+        # Clean up temporary directory
+        if not os.listdir(temp_dir):
+            os.rmdir(temp_dir)
+            
+        # 5. Write Summary to Text File
+        summary_path = os.path.join(base_dir, "split_summary.txt")
+        with open(summary_path, "w") as f:
+            f.write("--- Segmentation Dataset Extraction Summary ---\n")
+            f.write(f"Subset Classes: {subset_classes}\n")
+            f.write(f"Total Tiles Extracted: {len(tile_stats)}\n\n")
+            
+            f.write("--- Tile Distribution ---\n")
+            f.write(f"Train Tiles: {tiles_train}\n")
+            f.write(f"Validation Tiles: {tiles_val}\n")
+            f.write(f"Test Tiles: {tiles_test}\n\n")
+            
+            f.write("--- Pixel Balancing Targets ---\n")
+            f.write(f"Rarest Class: {rarest_class} (Total Pixels Available: {rarest_count})\n")
+            f.write(f"Train Target (70%): {train_target} pixels/class\n")
+            f.write(f"Val Target (20%):   {val_target} pixels/class\n\n")
+            
+            f.write("--- Final Pixel Counts per Class ---\n")
+            for c in subset_classes:
+                f.write(f"Class {c:2d} -> Train: {current_train[c]:6d} | Val: {current_val[c]:6d}\n")
+            f.write("\nNote: All tiles that overflowed the strict pixel targets were routed to the Test set.\n")
+            
+        print(f"\nExtraction and balancing complete. Summary saved to: {summary_path}")
+
     def get_file_list(self, from_train, limit, path=None):
         """
         Generates a fixed list of random sample IDs to ensure consistency 
