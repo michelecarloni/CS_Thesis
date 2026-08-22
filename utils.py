@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.colors as mcolors
 from H2Crop.data_structures import h2crop_taxonomy_dict, h2crop_band_mapping
+import glob
 
 #-------------------------------------------------------
 # UTILS For indian_pines, salinas_valley, pavia_center, pavia_university
@@ -688,3 +689,23 @@ def read_file_sample(file_sample_path):
         file_list = f.read().splitlines()
         return file_list
 
+
+
+# Helper for pipeline 
+def load_and_flatten_segmentation_tiles(directory):
+    """
+    Helper function to load 32x32 tiles and flatten them into pixel-wise tabular data.
+    """
+    files = glob.glob(os.path.join(directory, "*.npz"))
+    if not files:
+        raise ValueError(f"No .npz files found in {directory}")
+        
+    X_list, y_list = [], []
+    for f in files:
+        data = np.load(f)
+        # X is (Channels, H, W). Transpose to (H, W, Channels) then flatten to (Pixels, Channels)
+        X_img = data['X'].transpose(1, 2, 0)
+        X_list.append(X_img.reshape(-1, X_img.shape[-1]))
+        y_list.append(data['y'].flatten())
+        
+    return np.vstack(X_list), np.concatenate(y_list)

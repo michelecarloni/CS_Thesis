@@ -3,6 +3,7 @@ import json
 import gc
 import copy
 import glob
+import joblib
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -17,12 +18,22 @@ from utils import load_hyperspectral_dataset, normalize_features
 from H2Crop.data_structures import h2crop_taxonomy_dict
 from H2Crop.H2CropTileDataset import H2CropTileDataset
 from hyperparameter_tuning import optimize_hyperparameters, optimize_cnn_hyperparameters
+from utils import load_and_flatten_segmentation_tiles
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.multiclass import OneVsRestClassifier
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 import pandas as pd
 import cupy as cp
+
+# NVIDIA RAPIDS cuML (GPU Models)
+try:
+    from cuml.ensemble import RandomForestClassifier as cuRF
+    from cuml.linear_model import MBSGDClassifier as cuMBSGD
+except ImportError:
+    pass
 
 """
 Pipeline called for the first experiment (First Baseline):
@@ -767,3 +778,128 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
     print("Training Complete! All reports saved.")
     
     return model
+
+
+
+
+
+
+
+# The following 2 functions are for:
+# - training the first 4 standard ML models over the tiles
+# - Train
+
+def pipeline_H2Crop_standard_ML_algo_tiles(save_results_dir, dataset_dir, subset_id, modality, taxonomy=3, patch_size=32, use_gpu=True):
+    """
+    Trains standard ML algorithms pixel-by-pixel on segmentation tiles using fixed hyperparameters.
+    Saves the trained models to a checkpoints directory.
+    """
+    print(f"\n{'='*70}")
+    print(f"STARTING ML SEGMENTATION PIPELINE FOR: {modality.upper()} | Subset {subset_id}")
+    print(f"{'='*70}")
+
+    # Setup directories
+    results_out_dir = os.path.join(save_results_dir, "results", modality)
+    checkpoints_dir = os.path.join(save_results_dir, "checkpoints")
+    os.makedirs(results_out_dir, exist_ok=True)
+    os.makedirs(checkpoints_dir, exist_ok=True)
+    
+    # 1. Load Data (Skipping Validation to save RAM)
+    print("Loading and flattening Train tiles...")
+    X_train, y_train = load_and_flatten_segmentation_tiles(os.path.join(dataset_dir, "train"))
+    
+    print("Loading and flattening Test tiles...")
+    X_test, y_test = load_and_flatten_segmentation_tiles(os.path.join(dataset_dir, "test"))
+    
+    print(f"Data loaded! Train Pixels: {len(y_train)} | Test Pixels: {len(y_test)}")
+
+    # 2. Scale Features
+    print("Scaling features...")
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train).astype(np.float32)
+    X_test_scaled = scaler.transform(X_test).astype(np.float32)
+    
+    y_train = y_train.astype(np.int32)
+    y_test = y_test.astype(np.int32)
+    
+    # Save the scaler so we can use it during future inference if needed
+    scaler_filename = f"scaler_tiles_subset_{subset_id}_{modality}_tax_{taxonomy}_pSize_{patch_size}.joblib"
+    joblib.dump(scaler, os.path.join(checkpoints_dir, scaler_filename))
+    
+    del X_train, X_test
+    gc.collect()
+
+    # 3. Define Fixed Hyperparameter Models
+    models = {}
+    
+    print("Initializing models with fixed hyperparameters...")
+    # Decision Tree (Always CPU)
+    models["decision_tree"] = DecisionTreeClassifier(max_depth=20, random_state=42)
+    
+    if use_gpu:
+        # GPU Models using cuML
+        models["random_forest"] = cuRF(n_estimators=150, max_depth=20, max_features='sqrt', random_state=42)
+        models["logistic_regression"] = OneVsRestClassifier(estimator=cuMBSGD(loss='log', penalty='l2', alpha=1e-3, epochs=100))
+        models["linear_svm"] = OneVsRestClassifier(estimator=cuMBSGD(loss='hinge', penalty='l2', alpha=1e-3, epochs=100))
+    else:
+        # Fallback to CPU models if requested 
+        models["random_forest"] = RandomForestClassifier(n_estimators=100, max_depth=20, n_jobs=-1, random_state=42)
+        models["logistic_regression"] = LogisticRegression(max_iter=1000, n_jobs=-1, random_state=42)
+        models["linear_svm"] = LinearSVC(max_iter=1000, dual=False, random_state=42)
+
+    # 4. Training and Evaluation Loop
+    for algo_name, model in models.items():
+        print(f"\n--> Training {algo_name}...")
+        
+        # GPU VRAM CLEANUP before each model
+        gc.collect()
+        if use_gpu:
+            try:
+                cp.get_default_memory_pool().free_all_blocks() 
+                cp.get_default_pinned_memory_pool().free_all_blocks() 
+            except Exception:
+                pass
+        
+        # Fit the model
+        model.fit(X_train_scaled, y_train)
+        
+        # Save the model to checkpoints folder
+        model_filename = f"{algo_name}_tiles_subset_{subset_id}_{modality}_tax_{taxonomy}_pSize_{patch_size}.joblib"
+        model_filepath = os.path.join(checkpoints_dir, model_filename)
+        joblib.dump(model, model_filepath)
+        print(f"    Saved checkpoint to: {model_filepath}")
+        
+        # Evaluate on Test Set
+        print(f"    Evaluating Model on Test Set...")
+        y_pred = model.predict(X_test_scaled)
+        
+        algo_dir = os.path.join(results_out_dir, algo_name)
+        os.makedirs(algo_dir, exist_ok=True)
+        
+        # Use taxonomy directly
+        taxonomy_key = f'Taxonomy_{taxonomy}'
+        current_taxonomy = h2crop_taxonomy_dict.get(taxonomy_key, {})
+        
+        # Handle taxonomy mapping (0 is Background)
+        unique_classes = np.unique(np.concatenate((y_test, y_pred)))
+        target_names = [current_taxonomy.get(c, f"Class {c}") if c != 0 else "Background (0)" for c in unique_classes]
+        
+        # Generate and Save Classification Report
+        report_path = os.path.join(algo_dir, f"performance_subset_{subset_id}.txt")
+        report = classification_report(y_test, y_pred, labels=unique_classes, target_names=target_names, zero_division=0)
+        
+        with open(report_path, "w") as f:
+            f.write(f"--- Fixed Hyperparameters ---\nAlgorithm: {algo_name}\n\n")
+            f.write(f"--- Test Set Classification Report ---\n{report}")
+            
+        # Generate and Save Confusion Matrix
+        matrix_path = os.path.join(algo_dir, f"confusion_matrix_subset_{subset_id}.png")
+        fig, ax = plt.subplots(figsize=(10, 8))
+        ConfusionMatrixDisplay.from_predictions(y_test, y_pred, labels=unique_classes, ax=ax, cmap='Blues', colorbar=False, display_labels=target_names)
+        plt.title(f"Confusion Matrix: {algo_name}\n({modality} | Subset {subset_id} | pSize {patch_size})")
+        plt.xticks(rotation=45, ha='right', fontsize=9)
+        plt.tight_layout()
+        plt.savefig(matrix_path, dpi=300)
+        plt.close(fig)
+
+    print(f"\nPipeline completed successfully for {modality.upper()} Subset {subset_id}!")
