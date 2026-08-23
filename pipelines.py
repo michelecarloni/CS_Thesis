@@ -797,7 +797,7 @@ def pipeline_H2Crop_standard_ML_algo_tiles(
     taxonomy=3, 
     patch_size=32, 
     use_gpu=True, 
-    max_train_pixels=1000000,
+    max_train_pixels=500000,
     test_batch_size=50, 
     debug=False
 ):
