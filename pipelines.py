@@ -868,6 +868,36 @@ def pipeline_H2Crop_standard_ML_algo_tiles(save_results_dir, dataset_dir, subset
         print(f"    Evaluating Model on Test Set in batches of {test_batch_size} tiles...")
         global_cm = np.zeros((len(subset_classes), len(subset_classes)), dtype=np.int64)
         
+        # 4. Training and Evaluation Loop
+    for algo_name, model in models.items():
+        print(f"\n--> Training {algo_name}...")
+        
+        # GPU VRAM CLEANUP before each model
+        gc.collect()
+        if use_gpu:
+            try:
+                cp.get_default_memory_pool().free_all_blocks() 
+                cp.get_default_pinned_memory_pool().free_all_blocks() 
+            except Exception:
+                pass
+        
+        # Fit the model
+        model.fit(X_train_scaled, y_train)
+        
+        # Define project-level sibling path for checkpoints: ../checkpoints/<model_name>/<modality>
+        checkpoint_dir = os.path.join("..", "checkpoints", algo_name.lower(), modality)
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        
+        # Save the model to the correct checkpoint directory
+        model_filename = f"{algo_name}_tiles_subset_{subset_id}_tax_{taxonomy}_pSize_{patch_size}.joblib"
+        model_filepath = os.path.join(checkpoint_dir, model_filename)
+        joblib.dump(model, model_filepath)
+        print(f"    Saved checkpoint to: {model_filepath}")
+        
+        # Evaluate on Test Set using batched inference
+        print(f"    Evaluating Model on Test Set in batches of {test_batch_size} tiles...")
+        global_cm = np.zeros((len(subset_classes), len(subset_classes)), dtype=np.int64)
+        
         for i in range(0, len(test_files), test_batch_size):
             batch_paths = test_files[i:i+test_batch_size]
             X_batch_list, y_batch_list = [], []
