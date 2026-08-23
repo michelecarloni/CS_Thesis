@@ -825,7 +825,10 @@ def pipeline_H2Crop_standard_ML_algo_tiles(
     os.makedirs(results_out_dir, exist_ok=True)
     
     # CAPPED TRAINING LOADING
-    print(f"Loading Train tiles (Safety cap set to {max_train_pixels} pixels)...")
+    if debug:
+        print("Loading Train tiles (DEBUG MODE: Reading only 10 files)...")
+    else:
+        print(f"Loading Train tiles (Safety cap set to {max_train_pixels} pixels)...")
     X_train, y_train = load_and_flatten_segmentation_tiles(os.path.join(dataset_dir, "train"), debug=debug)
     
     # Apply the memory safety cap if we exceed the limit

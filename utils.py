@@ -692,7 +692,7 @@ def read_file_sample(file_sample_path):
 
 
 # Helper for pipeline 
-def load_and_flatten_segmentation_tiles(directory):
+def load_and_flatten_segmentation_tiles(directory, debug=False):
     """
     Helper function to load 32x32 tiles and flatten them into pixel-wise tabular data.
     """
@@ -700,12 +700,15 @@ def load_and_flatten_segmentation_tiles(directory):
     if not files:
         raise ValueError(f"No .npz files found in {directory}")
         
+    # If in debug mode, only process the first 10 files to save time and memory
+    if debug:
+        files = files[:10]
+        
     X_list, y_list = [], []
     for f in files:
         data = np.load(f)
-        # X is (Channels, H, W). Transpose to (H, W, Channels) then flatten to (Pixels, Channels)
-        X_img = data['X'].transpose(1, 2, 0)
+        X_img = data['X'].transpose(1, 2, 0).astype(np.float32)
         X_list.append(X_img.reshape(-1, X_img.shape[-1]))
-        y_list.append(data['y'].flatten())
+        y_list.append(data['y'].flatten().astype(np.int32))
         
     return np.vstack(X_list), np.concatenate(y_list)
