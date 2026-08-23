@@ -88,7 +88,6 @@ if __name__ == "__main__":
                         taxonomy=taxonomy,
                         patch_size=patch_size,
                         use_gpu=use_gpu,
-                        debug=True
                     )
                 else:
                     print(f"[Error] Dataset directory {dataset_dir} missing. Skipping training for this config.")

@@ -834,9 +834,14 @@ def pipeline_H2Crop_standard_ML_algo_tiles(
     # Apply the memory safety cap if we exceed the limit
     if len(y_train) > max_train_pixels:
         print(f"      [Memory Manager] Downsampling Train set from {len(y_train)} to {max_train_pixels} pixels...")
-        rng = np.random.default_rng(42)
-        idx = rng.choice(len(y_train), size=max_train_pixels, replace=False)
-        X_train, y_train = X_train[idx], y_train[idx]
+        # By setting stratify=y_train, we guarantee the exact same class balance 
+        # is preserved in the smaller dataset. We use 'test_size' to request exactly max_train_pixels.
+        _, X_train, _, y_train = train_test_split(
+            X_train, y_train, 
+            test_size=max_train_pixels, 
+            stratify=y_train, 
+            random_state=42
+        )
 
     print(f"Final Train Pixels for fitting: {len(y_train)}")
     print("Fitting Scaler and scaling Train features...")
