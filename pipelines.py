@@ -789,35 +789,60 @@ def pipeline_H2Crop_CNN(model, tiles_dir, save_results_dir, modality, batch_size
 # - training the first 4 standard ML models over the tiles
 # - Trainining the Depp learning models that will be compared to the first 4 standard ML models
 
-def pipeline_H2Crop_standard_ML_algo_tiles(save_results_dir, dataset_dir, subset_id, modality, taxonomy=3, patch_size=32, use_gpu=True, max_train_pixels=1000000, test_batch_size=50):
+def pipeline_H2Crop_standard_ML_algo_tiles(
+    save_results_dir, 
+    dataset_dir, 
+    subset_id, 
+    modality, 
+    taxonomy=3, 
+    patch_size=32, 
+    use_gpu=True, 
+    max_train_pixels=1000000,
+    test_batch_size=50, 
+    debug=False
+):
     """
-    Trains ML algorithms using a memory-capped training set and evaluates them using 
-    a batched sequential generator on the test set to prevent OOM crashes.
+    Trains standard Machine Learning algorithms on pixel-wise tile data.
+
+    Arguments:
+    - save_results_dir (str): The base directory path where evaluation metrics, reports, and confusion matrices will be saved.
+    - dataset_dir (str): The directory containing the extracted .npz tiles divided into 'train', 'validation', and 'test' subfolders.
+    - subset_id (int): The identifier for the current crop subset being processed (e.g., 1, 2, 3, or 4).
+    - modality (str): The type of satellite data being processed ('hyperspectral' or 'multispectral').
+    - taxonomy (int): The taxonomic hierarchical level used for mapping the class labels (default: 3).
+    - patch_size (int): The height and width of the square image tiles being processed (default: 32).
+    - use_gpu (bool): If True, attempts to use NVIDIA cuML for GPU-accelerated model training. Falls back to CPU if False.
+    - max_train_pixels (int): The absolute maximum number of pixels to load into memory for training. Prevents OOM crashes by downsampling if exceeded.
+    - test_batch_size (int): The number of .npz files to load simultaneously during the batched evaluation phase.
+    - debug (bool): If True, artificially restricts the dataset to just 10 files to rapidly test the pipeline plumbing without waiting.
     """
     print(f"\n{'='*70}")
-    print(f"STARTING ML SEGMENTATION PIPELINE FOR: {modality.upper()} | Subset {subset_id}")
+    mode = "DEBUG MODE" if debug else "PRODUCTION MODE"
+    print(f"STARTING ML SEGMENTATION PIPELINE FOR: {modality.upper()} | Subset {subset_id} | {mode}")
     print(f"{'='*70}")
 
-    # Set the results output directory directly under save_results_dir
     results_out_dir = os.path.join(save_results_dir, modality)
     os.makedirs(results_out_dir, exist_ok=True)
     
     # CAPPED TRAINING LOADING
-    print(f"Loading Train tiles (Capped at {max_train_pixels} pixels)...")
-    X_train, y_train = load_and_flatten_segmentation_tiles(os.path.join(dataset_dir, "train"))
+    print(f"Loading Train tiles (Safety cap set to {max_train_pixels} pixels)...")
+    X_train, y_train = load_and_flatten_segmentation_tiles(os.path.join(dataset_dir, "train"), debug=debug)
     
+    # Apply the memory safety cap if we exceed the limit
     if len(y_train) > max_train_pixels:
-        print(f"Downsampling Train set from {len(y_train)} to {max_train_pixels} pixels...")
+        print(f"      [Memory Manager] Downsampling Train set from {len(y_train)} to {max_train_pixels} pixels...")
         rng = np.random.default_rng(42)
         idx = rng.choice(len(y_train), size=max_train_pixels, replace=False)
         X_train, y_train = X_train[idx], y_train[idx]
 
+    print(f"Final Train Pixels for fitting: {len(y_train)}")
     print("Fitting Scaler and scaling Train features...")
+    
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train).astype(np.float32)
     y_train = y_train.astype(np.int32)
     
-    # Save the scaler to a common checkpoints directory outside the results folder
+    # Save the scaler to a centralized checkpoints directory
     scaler_dir = os.path.join("..", "checkpoints", "scalers", modality)
     os.makedirs(scaler_dir, exist_ok=True)
     scaler_filename = f"scaler_tiles_subset_{subset_id}_tax_{taxonomy}_pSize_{patch_size}.joblib"
@@ -826,7 +851,7 @@ def pipeline_H2Crop_standard_ML_algo_tiles(save_results_dir, dataset_dir, subset
     del X_train
     gc.collect()
 
-    # MODEL INITIALIZATION
+    # MODEL INITIALIZATION 
     models = {}
     models["decision_tree"] = DecisionTreeClassifier(max_depth=20, random_state=42)
     
@@ -846,6 +871,8 @@ def pipeline_H2Crop_standard_ML_algo_tiles(save_results_dir, dataset_dir, subset
 
     # TRAINING AND BATCHED EVALUATION
     test_files = glob.glob(os.path.join(dataset_dir, "test", "*.npz"))
+    if debug:
+        test_files = test_files[:10]  # Restrict test evaluation in debug mode
     
     for algo_name, model in models.items():
         print(f"\n--> Training {algo_name}...")
@@ -857,12 +884,14 @@ def pipeline_H2Crop_standard_ML_algo_tiles(save_results_dir, dataset_dir, subset
             except Exception:
                 pass
         
+        # Train the model
         model.fit(X_train_scaled, y_train)
         
-        # Save model checkpoint to its specific algorithm directory outside the results folder
+        # Create algorithm-specific checkpoint directory
         checkpoint_dir = os.path.join("..", "checkpoints", algo_name.lower(), modality)
         os.makedirs(checkpoint_dir, exist_ok=True)
         
+        # Serialize and save the model
         model_filename = f"{algo_name}_tiles_subset_{subset_id}_tax_{taxonomy}_pSize_{patch_size}.joblib"
         model_filepath = os.path.join(checkpoint_dir, model_filename)
         joblib.dump(model, model_filepath)
@@ -871,6 +900,7 @@ def pipeline_H2Crop_standard_ML_algo_tiles(save_results_dir, dataset_dir, subset
         print(f"    Evaluating Model on Test Set in batches of {test_batch_size} tiles...")
         global_cm = np.zeros((len(subset_classes), len(subset_classes)), dtype=np.int64)
         
+        # Batched inference over the test set
         for i in range(0, len(test_files), test_batch_size):
             batch_paths = test_files[i:i+test_batch_size]
             X_batch_list, y_batch_list = [], []
@@ -893,6 +923,7 @@ def pipeline_H2Crop_standard_ML_algo_tiles(save_results_dir, dataset_dir, subset
             del X_batch_list, y_batch_list, X_batch, y_batch, X_batch_scaled, y_pred
             gc.collect()
 
+        # Reconstruct dummy arrays for classification_report from the exact confusion matrix
         y_true_dummy, y_pred_dummy = [], []
         for i, true_label in enumerate(subset_classes):
             for j, pred_label in enumerate(subset_classes):
@@ -904,6 +935,7 @@ def pipeline_H2Crop_standard_ML_algo_tiles(save_results_dir, dataset_dir, subset
         algo_dir = os.path.join(results_out_dir, algo_name)
         os.makedirs(algo_dir, exist_ok=True)
         
+        # Generate classification report text file
         report_path = os.path.join(algo_dir, f"performance_subset_{subset_id}.txt")
         report = classification_report(y_true_dummy, y_pred_dummy, labels=subset_classes, target_names=target_names, zero_division=0)
         
@@ -911,6 +943,7 @@ def pipeline_H2Crop_standard_ML_algo_tiles(save_results_dir, dataset_dir, subset
             f.write(f"--- Batched Inference Complete ---\nAlgorithm: {algo_name}\n\n")
             f.write(f"--- Test Set Classification Report ---\n{report}")
             
+        # Generate and save visual confusion matrix
         matrix_path = os.path.join(algo_dir, f"confusion_matrix_subset_{subset_id}.png")
         fig, ax = plt.subplots(figsize=(10, 8))
         ConfusionMatrixDisplay(confusion_matrix=global_cm, display_labels=target_names).plot(ax=ax, cmap='Blues', colorbar=False)
