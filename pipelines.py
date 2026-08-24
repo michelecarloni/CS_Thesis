@@ -806,6 +806,9 @@ def pipeline_H2Crop_standard_ML_algo_tiles(
     """
     Trains standard Machine Learning algorithms on pixel-wise tile data using a 
     memory-safe Two-Pass Architecture (Train first, purge RAM, then Evaluate).
+    
+    Metrics are calculated directly from the confusion matrix to bypass OOM crashes
+    caused by massive dummy list allocations during inference on millions of pixels.
 
     Arguments:
     - save_results_dir (str): The base directory path where evaluation metrics, reports, and confusion matrices will be saved.
@@ -828,7 +831,7 @@ def pipeline_H2Crop_standard_ML_algo_tiles(
     results_out_dir = os.path.join(save_results_dir, modality)
     os.makedirs(results_out_dir, exist_ok=True)
     
-    # 1. CAPPED TRAINING LOADING & STRATIFIED DOWNSAMPLING
+    # CAPPED TRAINING LOADING & STRATIFIED DOWNSAMPLING
     if debug:
         print("Loading Train tiles (DEBUG MODE: Reading only 10 files)...")
     else:
@@ -862,9 +865,9 @@ def pipeline_H2Crop_standard_ML_algo_tiles(
     del X_train
     gc.collect()
 
-    # 2. LAZY MODEL INITIALIZATION
+    # LAZY MODEL INITIALIZATION
     # We use lambda functions so the models don't exist in memory until we explicitly call them.
-    # max_depth reduced to 15 to prevent exponential RAM bloat from leaf nodes.
+    # max_depth is reduced to 15 to prevent exponential RAM bloat from leaf nodes.
     model_configs = {
         "decision_tree": lambda: DecisionTreeClassifier(max_depth=15, random_state=42)
     }
@@ -883,7 +886,7 @@ def pipeline_H2Crop_standard_ML_algo_tiles(
     current_taxonomy = h2crop_taxonomy_dict.get(taxonomy_key, {})
     target_names = [current_taxonomy.get(c, f"Class {c}") if c != 0 else "Background (0)" for c in subset_classes]
 
-    # 3. TRAINING
+    # TRAINING ONLY
     print("\n--- INITIATING TRAINING PASS ---")
     for algo_name, model_fn in model_configs.items():
         print(f"--> Training and saving {algo_name}...")
@@ -898,7 +901,7 @@ def pipeline_H2Crop_standard_ML_algo_tiles(
         model = model_fn() # Instantiate model
         model.fit(X_train_scaled, y_train) # Train model
         
-        # Save model checkpoint to its specific algorithm directory outside the results folder
+        # Save model checkpoint to its specific algorithm directory
         checkpoint_dir = os.path.join("..", "checkpoints", algo_name.lower(), modality)
         os.makedirs(checkpoint_dir, exist_ok=True)
         model_filepath = os.path.join(checkpoint_dir, f"{algo_name}_tiles_subset_{subset_id}_tax_{taxonomy}_pSize_{patch_size}.joblib")
@@ -910,37 +913,44 @@ def pipeline_H2Crop_standard_ML_algo_tiles(
         del model
         gc.collect()
 
-    # THE MEMORY PURGE
+    # Memory purge
     print("\n[Memory Manager] Purging training data from RAM to prepare for evaluation...")
     del X_train_scaled
     del y_train
     gc.collect()
 
-    # 4. EVALUATION 
+    # EVALUATION ONLY
     print("\n--- INITIATING EVALUATION PASS ---")
     test_files = glob.glob(os.path.join(dataset_dir, "test", "*.npz"))
     if debug:
         test_files = test_files[:10]  # Restrict test files in debug mode
     
+    total_batches = (len(test_files) // test_batch_size) + 1
+
     for algo_name in model_configs.keys():
-        print(f"--> Evaluating {algo_name} on Test Set...")
+        print(f"\n--> Evaluating {algo_name} on Test Set ({len(test_files)} total tiles)...")
         
         # Load just this single model from disk
         checkpoint_dir = os.path.join("..", "checkpoints", algo_name.lower(), modality)
         model_filepath = os.path.join(checkpoint_dir, f"{algo_name}_tiles_subset_{subset_id}_tax_{taxonomy}_pSize_{patch_size}.joblib")
         model = joblib.load(model_filepath)
+        
         global_cm = np.zeros((len(subset_classes), len(subset_classes)), dtype=np.int64)
         
         # Batched inference over the test set
-        for i in range(0, len(test_files), test_batch_size):
+        for batch_idx, i in enumerate(range(0, len(test_files), test_batch_size)):
+            if batch_idx % 10 == 0:
+                print(f"      [Progress] Processing batch {batch_idx}/{total_batches}...")
+
             batch_paths = test_files[i:i+test_batch_size]
             X_batch_list, y_batch_list = [], []
             
             for f in batch_paths:
-                data = np.load(f)
-                X_img = data['X'].transpose(1, 2, 0).astype(np.float32)
-                X_batch_list.append(X_img.reshape(-1, X_img.shape[-1]))
-                y_batch_list.append(data['y'].flatten().astype(np.int32))
+                # Using 'with' forces Python to close the file and release memory instantly
+                with np.load(f) as data:
+                    X_img = data['X'].transpose(1, 2, 0).astype(np.float32)
+                    X_batch_list.append(X_img.reshape(-1, X_img.shape[-1]))
+                    y_batch_list.append(data['y'].flatten().astype(np.int32))
                 
             X_batch = np.vstack(X_batch_list)
             y_batch = np.concatenate(y_batch_list)
@@ -953,25 +963,64 @@ def pipeline_H2Crop_standard_ML_algo_tiles(
             cm = confusion_matrix(y_batch, y_pred, labels=subset_classes)
             global_cm += cm
             
+            # Aggressive cleanup for the current batch
             del X_batch_list, y_batch_list, X_batch, y_batch, X_batch_scaled, y_pred
             gc.collect()
 
-        # Reconstruct dummy arrays for classification_report from the exact confusion matrix
-        y_true_dummy, y_pred_dummy = [], []
-        for i, true_label in enumerate(subset_classes):
-            for j, pred_label in enumerate(subset_classes):
-                count = global_cm[i, j]
-                if count > 0:
-                    y_true_dummy.extend([true_label] * count)
-                    y_pred_dummy.extend([pred_label] * count)
+        print("      [Metrics] Calculating performance metrics directly from Confusion Matrix...")
+        
+        # RAM-SAFE CLASSIFICATION REPORT GENERATION
+        report_lines = [
+            f"{'':<25} {'precision':>10} {'recall':>10} {'f1-score':>10} {'support':>15}\n"
+        ]
+        
+        macro_p, macro_r, macro_f1 = 0.0, 0.0, 0.0
+        weighted_p, weighted_r, weighted_f1 = 0.0, 0.0, 0.0
+        total_support = np.sum(global_cm)
+        
+        for idx, target_name in enumerate(target_names):
+            tp = global_cm[idx, idx]
+            fp = global_cm[:, idx].sum() - tp
+            fn = global_cm[idx, :].sum() - tp
+            support = global_cm[idx, :].sum()
+            
+            p = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            r = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            f1 = 2 * p * r / (p + r) if (p + r) > 0 else 0.0
+            
+            report_lines.append(f"{target_name:<25} {p:>10.4f} {r:>10.4f} {f1:>10.4f} {support:>15}")
+            
+            macro_p += p
+            macro_r += r
+            macro_f1 += f1
+            
+            weighted_p += p * support
+            weighted_r += r * support
+            weighted_f1 += f1 * support
+            
+        num_classes = len(target_names)
+        macro_p /= num_classes
+        macro_r /= num_classes
+        macro_f1 /= num_classes
+        
+        weighted_p /= total_support if total_support > 0 else 1
+        weighted_r /= total_support if total_support > 0 else 1
+        weighted_f1 /= total_support if total_support > 0 else 1
+        
+        accuracy = np.trace(global_cm) / total_support if total_support > 0 else 0.0
+        
+        report_lines.append(f"\n{'accuracy':<25} {'':>10} {'':>10} {accuracy:>10.4f} {total_support:>15}")
+        report_lines.append(f"{'macro avg':<25} {macro_p:>10.4f} {macro_r:>10.4f} {macro_f1:>10.4f} {total_support:>15}")
+        report_lines.append(f"{'weighted avg':<25} {weighted_p:>10.4f} {weighted_r:>10.4f} {weighted_f1:>10.4f} {total_support:>15}")
+        
+        report = "\n".join(report_lines)
                     
+        # Output directory and save logic
         algo_dir = os.path.join(results_out_dir, algo_name)
         os.makedirs(algo_dir, exist_ok=True)
         
         # Generate classification report text file
         report_path = os.path.join(algo_dir, f"performance_subset_{subset_id}.txt")
-        report = classification_report(y_true_dummy, y_pred_dummy, labels=subset_classes, target_names=target_names, zero_division=0)
-        
         with open(report_path, "w") as f:
             f.write(f"--- Batched Inference Complete ---\nAlgorithm: {algo_name}\n\n")
             f.write(f"--- Test Set Classification Report ---\n{report}")

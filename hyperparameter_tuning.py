@@ -7,93 +7,86 @@ import torch.optim as optim
 
 # Scikit-Learn
 from sklearn.tree import DecisionTreeClassifier
-from sklearn.multiclass import OneVsRestClassifier as skOvR # Imported Scikit-Learn's stable meta-estimator
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import LinearSVC
 
 # NVIDIA RAPIDS cuML (GPU Models)
 try:
     from cuml.ensemble import RandomForestClassifier as cuRF
-    from cuml.linear_model import MBSGDClassifier as cuMBSGD
+    from cuml.linear_model import LogisticRegression as cuLR
+    from cuml.svm import LinearSVC as cuSVC
 except ImportError:
     pass
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-
-
-# For Standard ML algorithm
+# --- STANDARD ML OPTIMIZATION ---
 def optimize_hyperparameters(model_name, X_train, y_train, X_val, y_val, n_trials=20, random_state=42, use_gpu=True):
     """
-    Unified Optuna tuner optimized for local 8GB VRAM (RTX 4060).
-    Decision Tree is ALWAYS CPU. Random Forest, SVM, and LogReg are ALWAYS GPU.
+    Unified Optuna tuner optimized for local 8GB VRAM and 16GB RAM.
+    Bypasses OneVsRest classifiers to prevent fatal Out-Of-Memory crashes.
     """
     def objective(trial):
-        # --- 1. Decision Tree (Always CPU) ---
         if model_name == "decision_tree":
             params = {
                 'criterion': trial.suggest_categorical('criterion', ['gini', 'entropy']),
-                'max_depth': trial.suggest_int('max_depth', 3, 15),
+                'max_depth': trial.suggest_int('max_depth', 3, 15), # Capped at 15 for memory safety
                 'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
                 'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 10),
                 'random_state': random_state
             }
             model = DecisionTreeClassifier(**params)
 
-        # --- 2. Random Forest (Always GPU) ---
         elif model_name == "random_forest":
             params = {
-                'n_estimators': trial.suggest_int('n_estimators', 50, 250, step=50),
-                'max_depth': trial.suggest_int('max_depth', 5, 30),
-                'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 10),
-                'max_features': trial.suggest_categorical('max_features', ['sqrt', 'log2', 1.0]),
+                'n_estimators': trial.suggest_int('n_estimators', 50, 200, step=50),
+                'max_depth': trial.suggest_int('max_depth', 5, 15), # Capped at 15 for memory safety
+                'max_features': trial.suggest_categorical('max_features', ['sqrt', 'log2']),
                 'random_state': random_state
             }
-            model = cuRF(**params)
+            if use_gpu:
+                model = cuRF(**params)
+            else:
+                model = RandomForestClassifier(**params, n_jobs=1)
 
-        # --- 3. Linear SVM (GPU via Mini-Batch SGD wrapped safely in skOvR) ---
         elif model_name == "linear_svm":
             params = {
-                'loss': 'hinge', 
-                'penalty': 'l2',
-                'alpha': trial.suggest_float('alpha', 1e-5, 1e-1, log=True),
-                'batch_size': 2048,
-                'epochs': 100,
-                'learning_rate': 'adaptive'
+                'C': trial.suggest_float('C', 1e-4, 1e2, log=True),
             }
-            base_model = cuMBSGD(**params)
-            model = skOvR(estimator=base_model) # Using stable CPU wrapper
+            if use_gpu:
+                model = cuSVC(C=params['C'], max_iter=1000, penalty='l2')
+            else:
+                model = LinearSVC(C=params['C'], max_iter=1000, dual=False)
 
-        # --- 4. Logistic Regression (GPU via Mini-Batch SGD wrapped safely in skOvR) ---
         elif model_name == "logistic_regression":
             params = {
-                'loss': 'log', 
-                'penalty': 'l2',
-                'alpha': trial.suggest_float('alpha', 1e-5, 1e-1, log=True),
-                'batch_size': 2048, 
-                'epochs': 100,
-                'learning_rate': 'adaptive'
+                'C': trial.suggest_float('C', 1e-4, 1e2, log=True),
             }
-            base_model = cuMBSGD(**params)
-            model = skOvR(estimator=base_model) # Using stable CPU wrapper
-
+            if use_gpu:
+                model = cuLR(C=params['C'], max_iter=1000)
+            else:
+                model = LogisticRegression(C=params['C'], max_iter=1000, n_jobs=1)
         else:
             raise ValueError(f"Unknown model_name: '{model_name}'")
 
-        # Catch convergence warnings to keep logs clean
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             model.fit(X_train, y_train)
             
         return model.score(X_val, y_val)
 
+    print(f"\n--- Running Optuna Tuning for {model_name} ({n_trials} Trials) ---")
     sampler = optuna.samplers.TPESampler(seed=random_state)
     study = optuna.create_study(direction="maximize", sampler=sampler)
     study.optimize(objective, n_trials=n_trials)
 
-    print(f"    [Optuna] Best Val Accuracy for {model_name}: {study.best_value:.4f}")
+    print(f"    [Optuna] Best Val Accuracy: {study.best_value:.4f}")
     print(f"    [Optuna] Best Params: {study.best_params}")
 
+    # Rebuild and train the absolute best model
     best_params = study.best_params
-    best_model = _build_model(model_name, best_params, random_state)
+    best_model = _build_model(model_name, best_params, random_state, use_gpu)
     
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -101,103 +94,87 @@ def optimize_hyperparameters(model_name, X_train, y_train, X_val, y_val, n_trial
 
     return best_model, best_params
 
-
-def _build_model(model_name, params, random_state):
-    """Internal helper to instantiate a model from best parameters."""
+def _build_model(model_name, params, random_state, use_gpu):
+    """Instantiates the optimal model strictly using native multiclass logic."""
     if model_name == "decision_tree":
         return DecisionTreeClassifier(**params, random_state=random_state)
-        
     elif model_name == "random_forest":
-        return cuRF(**params, random_state=random_state)
-        
+        return cuRF(**params, random_state=random_state) if use_gpu else RandomForestClassifier(**params, n_jobs=1, random_state=random_state)
     elif model_name == "linear_svm":
-        return skOvR(estimator=cuMBSGD(**params))
-        
+        return cuSVC(C=params['C'], max_iter=1000) if use_gpu else LinearSVC(C=params['C'], max_iter=1000, dual=False)
     elif model_name == "logistic_regression":
-        return skOvR(estimator=cuMBSGD(**params))
+        return cuLR(C=params['C'], max_iter=1000) if use_gpu else LogisticRegression(C=params['C'], max_iter=1000, n_jobs=1)
 
-
-
-# For models that works with a Convolutional layer
+# --- DEEP LEARNING OPTIMIZATION ---
 def optimize_cnn_hyperparameters(model, train_loader, val_loader, initial_model_state, n_trials=10, epochs_per_trial=5, use_gpu=True):
     """
     Optuna optimization logic for PyTorch CNNs utilizing Mixed Precision (AMP) and tqdm.
+    Exclusively utilizes AdamW as the optimization algorithm[cite: 1].
     """
     from tqdm import tqdm 
     
     def objective(trial):
-        model.load_state_dict(copy.deepcopy(initial_model_state))
+        model.load_state_dict(copy.deepcopy(initial_model_state))[cite: 1]
         
-        lr = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
-        optimizer_name = trial.suggest_categorical("optimizer", ["Adam", "SGD"])
-        weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-2, log=True)
+        lr = trial.suggest_float("lr", 1e-5, 1e-3, log=True)[cite: 1]
+        weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-2, log=True)[cite: 1]
         
-        if optimizer_name == "Adam":
-            optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-        else:
-            optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=weight_decay)
+        # Strictly enforced AdamW optimizer per requirements
+        optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
             
-        criterion = nn.CrossEntropyLoss()
+        criterion = nn.CrossEntropyLoss()[cite: 1]
         
-        for epoch in range(epochs_per_trial):
-            model.train()
+        for epoch in range(epochs_per_trial):[cite: 1]
+            model.train()[cite: 1]
             
-            # --- Added TQDM Progress Bar for Training ---
-            train_loop = tqdm(train_loader, desc=f"Trial {trial.number} | Epoch {epoch+1}/{epochs_per_trial} [Train]", leave=False)
+            train_loop = tqdm(train_loader, desc=f"Trial {trial.number} | Epoch {epoch+1}/{epochs_per_trial} [Train]", leave=False)[cite: 1]
             
-            for batch_X, batch_y in train_loop:
-                if use_gpu and torch.cuda.is_available():
-                    batch_X, batch_y = batch_X.cuda(), batch_y.cuda()
+            for batch_X, batch_y in train_loop:[cite: 1]
+                if use_gpu and torch.cuda.is_available():[cite: 1]
+                    batch_X, batch_y = batch_X.cuda(), batch_y.cuda()[cite: 1]
                     
-                # Keep the input trap just as a best practice!
-                if torch.isnan(batch_X).any() or torch.isinf(batch_X).any():
-                    continue  
+                if torch.isnan(batch_X).any() or torch.isinf(batch_X).any():[cite: 1]
+                    continue[cite: 1]
 
-                optimizer.zero_grad()
+                optimizer.zero_grad()[cite: 1]
                 
-                # AMP DISABLED: Standard 32-bit Forward Pass (Improved with TF32)
-                outputs = model(batch_X)
-                loss = criterion(outputs, batch_y)
-                                
-                # Standard 32-bit Backward Pass
-                loss.backward()
+                outputs = model(batch_X)[cite: 1]
+                loss = criterion(outputs, batch_y)[cite: 1]
+                loss.backward()[cite: 1]
                 
-                # Keep gradient clipping to prevent optimizer explosions
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)[cite: 1]
+                optimizer.step()[cite: 1]
                 
-                optimizer.step()
+                train_loop.set_postfix(loss=loss.item())[cite: 1]
                 
-                train_loop.set_postfix(loss=loss.item())
-                
-            model.eval()
-            correct, total = 0, 0
+            model.eval()[cite: 1]
+            correct, total = 0, 0[cite: 1]
             
-            # Add TQDM progress bar
-            val_loop = tqdm(val_loader, desc=f"Trial {trial.number} | Epoch {epoch+1}/{epochs_per_trial} [Val]", leave=False)
+            val_loop = tqdm(val_loader, desc=f"Trial {trial.number} | Epoch {epoch+1}/{epochs_per_trial} [Val]", leave=False)[cite: 1]
             
-            with torch.no_grad():
-                for batch_X, batch_y in val_loop:
-                    if use_gpu and torch.cuda.is_available():
-                        batch_X, batch_y = batch_X.cuda(), batch_y.cuda()
+            with torch.no_grad():[cite: 1]
+                for batch_X, batch_y in val_loop:[cite: 1]
+                    if use_gpu and torch.cuda.is_available():[cite: 1]
+                        batch_X, batch_y = batch_X.cuda(), batch_y.cuda()[cite: 1]
                         
-                    outputs = model(batch_X)
-                    _, predicted = torch.max(outputs.data, 1)
-                    total += batch_y.size(0)
-                    correct += (predicted == batch_y).sum().item()
+                    outputs = model(batch_X)[cite: 1]
+                    _, predicted = torch.max(outputs.data, 1)[cite: 1]
+                    total += batch_y.size(0)[cite: 1]
+                    correct += (predicted == batch_y).sum().item()[cite: 1]
                     
-            val_accuracy = correct / total
+            val_accuracy = correct / total[cite: 1]
+            trial.report(val_accuracy, epoch)[cite: 1]
             
-            trial.report(val_accuracy, epoch)
-            if trial.should_prune():
-                raise optuna.exceptions.TrialPruned()
+            if trial.should_prune():[cite: 1]
+                raise optuna.exceptions.TrialPruned()[cite: 1]
                 
-        return val_accuracy
+        return val_accuracy[cite: 1]
 
-    print(f"\n--- Running Optuna Tuning ({n_trials} Trials) ---")
-    study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=42))
-    study.optimize(objective, n_trials=n_trials)
+    print(f"\n--- Running Optuna Tuning ({n_trials} Trials) ---")[cite: 1]
+    study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=42))[cite: 1]
+    study.optimize(objective, n_trials=n_trials)[cite: 1]
     
-    print(f"\n[Optuna] Best Trial: {study.best_trial.number}")
-    print(f"[Optuna] Best Validation Accuracy: {study.best_value:.4f}")
+    print(f"\n[Optuna] Best Trial: {study.best_trial.number}")[cite: 1]
+    print(f"[Optuna] Best Validation Accuracy: {study.best_value:.4f}")[cite: 1]
     
-    return study.best_params
+    return study.best_params[cite: 1]
