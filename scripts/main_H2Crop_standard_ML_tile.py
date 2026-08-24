@@ -68,7 +68,7 @@ if __name__ == "__main__":
                     )
 
     # ==========================================
-    # 3. TRAINING PHASE (ML Baselines)
+    # 2. TRAINING PHASE (ML Baselines)
     # ==========================================
     print("\n--- Starting Training Phase (Standard ML Segmentations) ---")
     

@@ -31,6 +31,8 @@ import cupy as cp
 # NVIDIA RAPIDS cuML (GPU Models)
 try:
     from cuml.ensemble import RandomForestClassifier as cuRF
+    from cuml.linear_model import LogisticRegression as cuLR
+    from cuml.svm import LinearSVC as cuSVC
     from cuml.linear_model import MBSGDClassifier as cuMBSGD
 except ImportError:
     pass
@@ -802,7 +804,8 @@ def pipeline_H2Crop_standard_ML_algo_tiles(
     debug=False
 ):
     """
-    Trains standard Machine Learning algorithms on pixel-wise tile data.
+    Trains standard Machine Learning algorithms on pixel-wise tile data using a 
+    memory-safe Two-Pass Architecture (Train first, purge RAM, then Evaluate).
 
     Arguments:
     - save_results_dir (str): The base directory path where evaluation metrics, reports, and confusion matrices will be saved.
@@ -812,7 +815,7 @@ def pipeline_H2Crop_standard_ML_algo_tiles(
     - taxonomy (int): The taxonomic hierarchical level used for mapping the class labels (default: 3).
     - patch_size (int): The height and width of the square image tiles being processed (default: 32).
     - use_gpu (bool): If True, attempts to use NVIDIA cuML for GPU-accelerated model training. Falls back to CPU if False.
-    - max_train_pixels (int): The absolute maximum number of pixels to load into memory for training. Prevents OOM crashes by downsampling if exceeded.
+    - max_train_pixels (int): The absolute maximum number of pixels to load into memory for training. Uses stratified sampling to balance classes.
     - test_batch_size (int): The number of .npz files to load simultaneously during the batched evaluation phase.
     - debug (bool): If True, artificially restricts the dataset to just 10 files to rapidly test the pipeline plumbing without waiting.
     """
@@ -821,21 +824,21 @@ def pipeline_H2Crop_standard_ML_algo_tiles(
     print(f"STARTING ML SEGMENTATION PIPELINE FOR: {modality.upper()} | Subset {subset_id} | {mode}")
     print(f"{'='*70}")
 
+    # Set the results output directory directly under save_results_dir
     results_out_dir = os.path.join(save_results_dir, modality)
     os.makedirs(results_out_dir, exist_ok=True)
     
-    # CAPPED TRAINING LOADING
+    # 1. CAPPED TRAINING LOADING & STRATIFIED DOWNSAMPLING
     if debug:
         print("Loading Train tiles (DEBUG MODE: Reading only 10 files)...")
     else:
         print(f"Loading Train tiles (Safety cap set to {max_train_pixels} pixels)...")
+        
     X_train, y_train = load_and_flatten_segmentation_tiles(os.path.join(dataset_dir, "train"), debug=debug)
     
-    # Apply the memory safety cap if we exceed the limit
+    # Apply memory safety cap with Stratified Sampling to preserve perfect class balance
     if len(y_train) > max_train_pixels:
-        print(f"      [Memory Manager] Downsampling Train set from {len(y_train)} to {max_train_pixels} pixels...")
-        # By setting stratify=y_train, we guarantee the exact same class balance 
-        # is preserved in the smaller dataset. We use 'test_size' to request exactly max_train_pixels.
+        print(f"      [Memory Manager] Stratified downsampling from {len(y_train)} to {max_train_pixels} pixels...")
         _, X_train, _, y_train = train_test_split(
             X_train, y_train, 
             test_size=max_train_pixels, 
@@ -859,31 +862,31 @@ def pipeline_H2Crop_standard_ML_algo_tiles(
     del X_train
     gc.collect()
 
-    # MODEL INITIALIZATION 
-    models = {}
-    models["decision_tree"] = DecisionTreeClassifier(max_depth=20, random_state=42)
+    # 2. LAZY MODEL INITIALIZATION
+    # We use lambda functions so the models don't exist in memory until we explicitly call them.
+    # max_depth reduced to 15 to prevent exponential RAM bloat from leaf nodes.
+    model_configs = {
+        "decision_tree": lambda: DecisionTreeClassifier(max_depth=15, random_state=42)
+    }
     
     if use_gpu:
-        models["random_forest"] = cuRF(n_estimators=150, max_depth=20, max_features='sqrt', random_state=42)
-        models["logistic_regression"] = OneVsRestClassifier(estimator=cuMBSGD(loss='log', penalty='l2', alpha=1e-3, epochs=100))
-        models["linear_svm"] = OneVsRestClassifier(estimator=cuMBSGD(loss='hinge', penalty='l2', alpha=1e-3, epochs=100))
+        model_configs["random_forest"] = lambda: cuRF(n_estimators=150, max_depth=15, max_features='sqrt', random_state=42)
+        model_configs["logistic_regression"] = lambda: cuLR(max_iter=1000)
+        model_configs["linear_svm"] = lambda: cuSVC(max_iter=1000, penalty='l2')
     else:
-        models["random_forest"] = RandomForestClassifier(n_estimators=100, max_depth=20, n_jobs=-1, random_state=42)
-        models["logistic_regression"] = LogisticRegression(max_iter=1000, n_jobs=-1, random_state=42)
-        models["linear_svm"] = LinearSVC(max_iter=1000, dual=False, random_state=42)
+        model_configs["random_forest"] = lambda: RandomForestClassifier(n_estimators=100, max_depth=15, n_jobs=1, random_state=42)
+        model_configs["logistic_regression"] = lambda: LogisticRegression(max_iter=1000, n_jobs=1, random_state=42)
+        model_configs["linear_svm"] = lambda: LinearSVC(max_iter=1000, dual=False, random_state=42)
 
     subset_classes = np.unique(y_train)
     taxonomy_key = f'Taxonomy_{taxonomy}'
     current_taxonomy = h2crop_taxonomy_dict.get(taxonomy_key, {})
     target_names = [current_taxonomy.get(c, f"Class {c}") if c != 0 else "Background (0)" for c in subset_classes]
 
-    # TRAINING AND BATCHED EVALUATION
-    test_files = glob.glob(os.path.join(dataset_dir, "test", "*.npz"))
-    if debug:
-        test_files = test_files[:10]  # Restrict test evaluation in debug mode
-    
-    for algo_name, model in models.items():
-        print(f"\n--> Training {algo_name}...")
+    # 3. TRAINING
+    print("\n--- INITIATING TRAINING PASS ---")
+    for algo_name, model_fn in model_configs.items():
+        print(f"--> Training and saving {algo_name}...")
         gc.collect()
         if use_gpu:
             try:
@@ -892,20 +895,40 @@ def pipeline_H2Crop_standard_ML_algo_tiles(
             except Exception:
                 pass
         
-        # Train the model
-        model.fit(X_train_scaled, y_train)
+        model = model_fn() # Instantiate model
+        model.fit(X_train_scaled, y_train) # Train model
         
-        # Create algorithm-specific checkpoint directory
+        # Save model checkpoint to its specific algorithm directory outside the results folder
         checkpoint_dir = os.path.join("..", "checkpoints", algo_name.lower(), modality)
         os.makedirs(checkpoint_dir, exist_ok=True)
+        model_filepath = os.path.join(checkpoint_dir, f"{algo_name}_tiles_subset_{subset_id}_tax_{taxonomy}_pSize_{patch_size}.joblib")
         
-        # Serialize and save the model
-        model_filename = f"{algo_name}_tiles_subset_{subset_id}_tax_{taxonomy}_pSize_{patch_size}.joblib"
-        model_filepath = os.path.join(checkpoint_dir, model_filename)
-        joblib.dump(model, model_filepath)
+        joblib.dump(model, model_filepath) # Serialize to disk
         print(f"    Saved checkpoint to: {model_filepath}")
         
-        print(f"    Evaluating Model on Test Set in batches of {test_batch_size} tiles...")
+        # Immediately destroy the trained model from RAM
+        del model
+        gc.collect()
+
+    # THE MEMORY PURGE
+    print("\n[Memory Manager] Purging training data from RAM to prepare for evaluation...")
+    del X_train_scaled
+    del y_train
+    gc.collect()
+
+    # 4. EVALUATION 
+    print("\n--- INITIATING EVALUATION PASS ---")
+    test_files = glob.glob(os.path.join(dataset_dir, "test", "*.npz"))
+    if debug:
+        test_files = test_files[:10]  # Restrict test files in debug mode
+    
+    for algo_name in model_configs.keys():
+        print(f"--> Evaluating {algo_name} on Test Set...")
+        
+        # Load just this single model from disk
+        checkpoint_dir = os.path.join("..", "checkpoints", algo_name.lower(), modality)
+        model_filepath = os.path.join(checkpoint_dir, f"{algo_name}_tiles_subset_{subset_id}_tax_{taxonomy}_pSize_{patch_size}.joblib")
+        model = joblib.load(model_filepath)
         global_cm = np.zeros((len(subset_classes), len(subset_classes)), dtype=np.int64)
         
         # Batched inference over the test set
@@ -922,9 +945,11 @@ def pipeline_H2Crop_standard_ML_algo_tiles(
             X_batch = np.vstack(X_batch_list)
             y_batch = np.concatenate(y_batch_list)
             
+            # Use the saved scaler to project the test data into the training space
             X_batch_scaled = scaler.transform(X_batch).astype(np.float32)
             y_pred = model.predict(X_batch_scaled)
             
+            # Accumulate metrics
             cm = confusion_matrix(y_batch, y_pred, labels=subset_classes)
             global_cm += cm
             
@@ -960,5 +985,9 @@ def pipeline_H2Crop_standard_ML_algo_tiles(
         plt.tight_layout()
         plt.savefig(matrix_path, dpi=300)
         plt.close(fig)
+
+        # Clean up the model before loading the next one
+        del model
+        gc.collect()
 
     print(f"\nPipeline completed successfully for {modality.upper()} Subset {subset_id}!")
