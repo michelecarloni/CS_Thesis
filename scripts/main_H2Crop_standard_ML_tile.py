@@ -7,15 +7,26 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 from H2Crop.H2Crop import H2Crop
-from pipelines import pipeline_H2Crop_standard_ML_algo_tiles
+# Import both the standard baseline and the Optuna-optimized pipeline
+from pipelines import (
+    pipeline_H2Crop_standard_ML_algo_tiles, 
+    pipeline_H2Crop_standard_ML_algo_tiles_optuna
+)
 
 if __name__ == "__main__":
-    # Define the parameters and subsets
+    # ==========================================
+    # HYPERPARAMETERS & CONFIGURATION
+    # ==========================================
     modalities = ["hyperspectral", "multispectral"]
     taxonomy = 3
     patch_sizes = [32]
     save_results_dir = "../results_5"
     use_gpu = True
+    
+    use_optuna = True            
+    n_trials = 8                # Number of Optuna trials to run per algorithm
+    max_train_pixels = 500000    # Memory safety cap for training data
+    debug = True                # Toggle to True for a rapid plumbing test (processes only 10 files)
     
     subsets = {
         1: [8, 11, 23, 56],
@@ -80,14 +91,32 @@ if __name__ == "__main__":
                 dataset_dir = os.path.join(save_base_dir, f"{mod}_taxonomy_{taxonomy}_pSize_{patch_size}")
                 
                 if os.path.exists(dataset_dir):
-                    pipeline_H2Crop_standard_ML_algo_tiles(
-                        save_results_dir=save_results_dir,
-                        dataset_dir=dataset_dir,
-                        subset_id=subset_id,
-                        modality=mod,
-                        taxonomy=taxonomy,
-                        patch_size=patch_size,
-                        use_gpu=use_gpu,
-                    )
+                    
+                    # Route to the appropriate pipeline based on the toggle
+                    if use_optuna:
+                        pipeline_H2Crop_standard_ML_algo_tiles_optuna(
+                            save_results_dir=save_results_dir,
+                            dataset_dir=dataset_dir,
+                            subset_id=subset_id,
+                            modality=mod,
+                            taxonomy=taxonomy,
+                            patch_size=patch_size,
+                            use_gpu=use_gpu,
+                            max_train_pixels=max_train_pixels,
+                            n_trials=n_trials,
+                            debug=debug
+                        )
+                    else:
+                        pipeline_H2Crop_standard_ML_algo_tiles(
+                            save_results_dir=save_results_dir,
+                            dataset_dir=dataset_dir,
+                            subset_id=subset_id,
+                            modality=mod,
+                            taxonomy=taxonomy,
+                            patch_size=patch_size,
+                            use_gpu=use_gpu,
+                            max_train_pixels=max_train_pixels,
+                            debug=debug
+                        )
                 else:
                     print(f"[Error] Dataset directory {dataset_dir} missing. Skipping training for this config.")
