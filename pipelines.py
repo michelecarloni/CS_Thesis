@@ -1256,12 +1256,13 @@ def pipeline_H2Crop_standard_ML_algo_tiles_optuna(
 
 
 
-def pipeline_H2Crop_dl_optuna(
+def pipeline_H2Crop_unet_optuna(
     model, 
     model_name,
     save_results_dir, 
     dataset_dir, 
     subset_id, 
+    subset_classes,
     modality, 
     taxonomy=3, 
     patch_size=32, 
@@ -1275,6 +1276,7 @@ def pipeline_H2Crop_dl_optuna(
     """
     Optuna-powered Deep Learning segmentation pipeline.
     Processes a single PyTorch model at a time, driven by the main script.
+    Deterministically locks output channels using the provided subset_classes.
     """
     print(f"\n{'='*70}")
     mode = "DEBUG MODE" if debug else "PRODUCTION MODE (DEEP LEARNING)"
@@ -1292,16 +1294,18 @@ def pipeline_H2Crop_dl_optuna(
     # LAZY DATALOADER INITIALIZATION
     print("\n--- Initializing PyTorch DataLoaders ---")
     
-    train_dataset = H2CropTileDataset(os.path.join(dataset_dir, "train"), debug=debug)
-    val_dataset = H2CropTileDataset(os.path.join(dataset_dir, "validation"), debug=debug)
-    test_dataset = H2CropTileDataset(os.path.join(dataset_dir, "test"), debug=debug)
+    # Pass the subset_classes into the Dataset so it builds the exact same map every time
+    train_dataset = H2CropTileDataset(os.path.join(dataset_dir, "train"), subset_classes=subset_classes, debug=debug)
+    val_dataset = H2CropTileDataset(os.path.join(dataset_dir, "validation"), subset_classes=subset_classes, debug=debug)
+    test_dataset = H2CropTileDataset(os.path.join(dataset_dir, "test"), subset_classes=subset_classes, debug=debug)
     
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=use_gpu)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=use_gpu)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=use_gpu)
 
-    sample_y = train_dataset.get_unique_classes()
-    num_classes = len(sample_y)
+    # We now know exactly what num_classes is deterministically!
+    num_classes = len(subset_classes) + 1
+    sample_y = [0] + sorted(subset_classes)
     
     taxonomy_key = f'Taxonomy_{taxonomy}'
     target_names = [h2crop_taxonomy_dict.get(taxonomy_key, {}).get(c, f"Class {c}") if c != 0 else "Background (0)" for c in sample_y]
@@ -1313,7 +1317,7 @@ def pipeline_H2Crop_dl_optuna(
     model = model.to(device)
     initial_model_state = copy.deepcopy(model.state_dict())
 
-    # OPTUNA HYPERPARAMETER TUNING 
+    # OPTUNA HYPERPARAMETER TUNING
     active_trials = 2 if debug else n_trials
     active_epochs = 1 if debug else epochs_per_trial
     

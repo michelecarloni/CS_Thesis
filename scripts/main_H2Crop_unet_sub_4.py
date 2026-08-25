@@ -7,8 +7,8 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 from H2Crop.H2Crop import H2Crop
-from pipelines import pipeline_H2Crop_dl_optuna
-from unet import UNet  
+from pipelines import pipeline_H2Crop_unet_optuna
+from models.unet import UNet  
 
 if __name__ == "__main__":
     # ==========================================
@@ -17,16 +17,17 @@ if __name__ == "__main__":
     modalities = ["hyperspectral", "multispectral"]
     taxonomy = 3
     patch_sizes = [32]
+    save_results_dir = "../results_5"
     
     # New: Define encoders to test
     encoders = ["resnet18", "resnet50"]
     
     use_gpu = True
-    n_trials = 10                
+    n_trials = 2            # 8         
     epochs_per_trial = 5         
-    final_epochs = 20            
+    final_epochs = 2       # 20  
     batch_size = 32              
-    debug = False                
+    debug = True                
     
     subsets = {
         1: [8, 11, 23, 56],
@@ -81,7 +82,7 @@ if __name__ == "__main__":
         for patch_size in patch_sizes:
             
             # Construct the exact results directory format: e.g., results_5/unet_enc_resnet18_32
-            current_results_dir = f"../results_5/unet_enc_{encoder}_{patch_size}"
+            current_results_dir = os.path.join(save_results_dir, f"unet_enc_{encoder}_{patch_size}")
             
             for subset_id, subset_classes in subsets.items():
                 save_base_dir = f"../ds/H2Crop_tiles_ds_subset_{subset_id}"
@@ -103,12 +104,13 @@ if __name__ == "__main__":
                             encoder_depth=3
                         )
                         
-                        pipeline_H2Crop_dl_optuna(
+                        pipeline_H2Crop_unet_optuna(
                             model=model,
                             model_name=model_name,
                             save_results_dir=current_results_dir,
                             dataset_dir=dataset_dir,
                             subset_id=subset_id,
+                            subset_classes=subset_classes,
                             modality=mod,
                             taxonomy=taxonomy,
                             patch_size=patch_size,

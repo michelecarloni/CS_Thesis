@@ -7,41 +7,38 @@ from torch.utils.data import Dataset
 class H2CropTileDataset(Dataset):
     """
     Custom PyTorch Dataset that loads tiles from disk on the fly.
-    Accepts a directory path and a debug flag to dynamically build the filepath list.
+    Uses a deterministic subset_classes list to map labels, eliminating the need to scan files.
     """
-    def __init__(self, directory, debug=False):
-        # Find all .npz files in the provided directory
+    def __init__(self, directory, subset_classes, debug=False):
         self.filepaths = glob.glob(os.path.join(directory, "*.npz"))
         
-        # If debug mode is active, aggressively cut down the dataset to 10 files
         if debug:
             self.filepaths = self.filepaths[:10]
             
         if len(self.filepaths) == 0:
             raise ValueError(f"No .npz files found in {directory}. Check your paths!")
+            
+        # 1. Deterministically build the classes array (Background 0 + sorted subset crops)
+        self.unique_classes = np.array([0] + sorted(subset_classes))
         
+        # 2. Build a highly optimized NumPy lookup array for O(1) label mapping
+        max_label = int(np.max(self.unique_classes))
+        self.label_mapping = np.zeros(max_label + 1, dtype=np.int64)
+        for new_idx, raw_label in enumerate(self.unique_classes):
+            self.label_mapping[raw_label] = new_idx
+
     def __len__(self):
         return len(self.filepaths)
         
     def __getitem__(self, idx):
-        # Load a single tile into RAM only when the DataLoader requests it[cite: 4]
-        # Using 'with' ensures the file is safely closed immediately after reading
         with np.load(self.filepaths[idx]) as data:
-            X = torch.tensor(data['X'], dtype=torch.float32)[cite: 4]
-            y = torch.tensor(data['y'], dtype=torch.long)[cite: 4]
+            X = torch.tensor(data['X'], dtype=torch.float32)
+            
+            # Extract raw spatial labels
+            raw_y = data['y']
+            
+            # Instantly map all pixels to contiguous 0-N indices using the lookup array
+            mapped_y = self.label_mapping[raw_y]
+            y = torch.tensor(mapped_y, dtype=torch.long)
             
         return X, y
-
-    def get_unique_classes(self):
-        """
-        Scans the dataset to identify all unique classes present.
-        Used by the pipeline to dynamically configure the U-Net's output channels.
-        """
-        unique_classes = set()
-        
-        print(f"      [Dataset] Scanning {len(self.filepaths)} files to determine unique classes...")
-        for fp in self.filepaths:
-            with np.load(fp) as data:
-                unique_classes.update(np.unique(data['y']).tolist())
-                
-        return np.array(sorted(list(unique_classes)))
