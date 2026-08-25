@@ -24,9 +24,9 @@ if __name__ == "__main__":
     use_gpu = True
     
     use_optuna = True            
-    n_trials = 2                # Number of Optuna trials to run per algorithm
+    n_trials = 8                # Number of Optuna trials to run per algorithm
     max_train_pixels = 500000    # Memory safety cap for training data
-    debug = True                # Toggle to True for a rapid plumbing test (processes only 10 files)
+    debug = False                # Toggle to True for a rapid plumbing test (processes only 10 files)
     
     subsets = {
         1: [8, 11, 23, 56],
