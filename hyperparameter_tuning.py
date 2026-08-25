@@ -12,6 +12,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.svm import LinearSVC
 from sklearn.metrics import f1_score
 from sklearn.utils.class_weight import compute_sample_weight
+import segmentation_models_pytorch as smp
 
 # NVIDIA RAPIDS cuML (GPU Models)
 try:
@@ -237,8 +238,7 @@ def optimize_unet_hyperparameters(model, train_loader, val_loader, initial_model
         # Strictly enforced AdamW optimizer
         optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
         
-        # CrossEntropyLoss natively handles (Batch, Classes, H, W) vs (Batch, H, W)
-        criterion = nn.CrossEntropyLoss()
+        criterion = smp.losses.DiceLoss(mode='multiclass', ignore_index=0)
         
         for epoch in range(epochs_per_trial):
             # TRAINING PHASE
