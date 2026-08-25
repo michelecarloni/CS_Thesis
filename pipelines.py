@@ -17,7 +17,7 @@ from sklearn.metrics import classification_report, confusion_matrix, accuracy_sc
 from utils import load_hyperspectral_dataset, normalize_features
 from H2Crop.data_structures import h2crop_taxonomy_dict
 from H2Crop.H2CropTileDataset import H2CropTileDataset
-from hyperparameter_tuning import optimize_hyperparameters, optimize_cnn_hyperparameters
+from hyperparameter_tuning import optimize_hyperparameters, optimize_cnn_hyperparameters, optimize_unet_hyperparameters
 from utils import load_and_flatten_segmentation_tiles
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.multiclass import OneVsRestClassifier
@@ -1253,3 +1253,181 @@ def pipeline_H2Crop_standard_ML_algo_tiles_optuna(
         gc.collect()
 
     print(f"\nOptuna Pipeline completed successfully for {modality.upper()} Subset {subset_id}!")
+
+
+
+def pipeline_H2Crop_dl_optuna(
+    model, 
+    model_name,
+    save_results_dir, 
+    dataset_dir, 
+    subset_id, 
+    modality, 
+    taxonomy=3, 
+    patch_size=32, 
+    use_gpu=True, 
+    n_trials=10,
+    epochs_per_trial=5,
+    final_epochs=20,
+    batch_size=32, 
+    debug=False
+):
+    """
+    Optuna-powered Deep Learning segmentation pipeline.
+    Processes a single PyTorch model at a time, driven by the main script.
+    """
+    print(f"\n{'='*70}")
+    mode = "DEBUG MODE" if debug else "PRODUCTION MODE (DEEP LEARNING)"
+    print(f"STARTING PIPELINE FOR: {model_name.upper()} | {modality.upper()} | Subset {subset_id} | {mode}")
+    print(f"{'='*70}")
+
+    # Results will now be saved directly into the dynamically generated folder from main
+    results_out_dir = os.path.join(save_results_dir, modality)
+    os.makedirs(results_out_dir, exist_ok=True)
+    
+    # Checkpoints organized by model name
+    checkpoint_dir = os.path.join("..", "checkpoints", model_name, modality)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    # LAZY DATALOADER INITIALIZATION
+    print("\n--- Initializing PyTorch DataLoaders ---")
+    
+    train_dataset = H2CropTileDataset(os.path.join(dataset_dir, "train"), debug=debug)
+    val_dataset = H2CropTileDataset(os.path.join(dataset_dir, "validation"), debug=debug)
+    test_dataset = H2CropTileDataset(os.path.join(dataset_dir, "test"), debug=debug)
+    
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=use_gpu)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=use_gpu)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=use_gpu)
+
+    sample_y = train_dataset.get_unique_classes()
+    num_classes = len(sample_y)
+    
+    taxonomy_key = f'Taxonomy_{taxonomy}'
+    target_names = [h2crop_taxonomy_dict.get(taxonomy_key, {}).get(c, f"Class {c}") if c != 0 else "Background (0)" for c in sample_y]
+
+    device = torch.device("cuda" if use_gpu and torch.cuda.is_available() else "cpu")
+    print(f"Compute Device: {device}")
+
+    # MODEL SETUP
+    model = model.to(device)
+    initial_model_state = copy.deepcopy(model.state_dict())
+
+    # OPTUNA HYPERPARAMETER TUNING 
+    active_trials = 2 if debug else n_trials
+    active_epochs = 1 if debug else epochs_per_trial
+    
+    best_params = optimize_unet_hyperparameters(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        initial_model_state=initial_model_state,
+        num_classes=num_classes,
+        n_trials=active_trials,
+        epochs_per_trial=active_epochs,
+        use_gpu=use_gpu
+    )
+    
+    with open(os.path.join(results_out_dir, f"best_params_subset_{subset_id}.json"), "w") as f:
+        json.dump(best_params, f, indent=4)
+
+    # FINAL PRODUCTION TRAINING
+    print(f"\n--- INITIATING FINAL TRAINING: {model_name} ---")
+    
+    model.load_state_dict(initial_model_state)
+    optimizer = optim.AdamW(model.parameters(), lr=best_params['lr'], weight_decay=best_params['weight_decay'])
+    criterion = nn.CrossEntropyLoss()
+    
+    train_epochs = 2 if debug else final_epochs
+    
+    for epoch in range(train_epochs):
+        model.train()
+        running_loss = 0.0
+        
+        for batch_X, batch_y in train_loader:
+            batch_X, batch_y = batch_X.to(device), batch_y.long().to(device)
+            
+            optimizer.zero_grad()
+            outputs = model(batch_X)
+            loss = criterion(outputs, batch_y)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            
+            running_loss += loss.item()
+            
+        print(f"    Epoch {epoch+1}/{train_epochs} | Loss: {running_loss/len(train_loader):.4f}")
+        
+    model_filepath = os.path.join(checkpoint_dir, f"{model_name}_subset_{subset_id}_optuna.pth")
+    torch.save(model.state_dict(), model_filepath)
+    print(f"    Saved checkpoint to: {model_filepath}")
+
+    # RAM-SAFE TEST EVALUATION
+    print(f"\n--- EVALUATING ON TEST SET ---")
+    model.eval()
+    global_cm = torch.zeros((num_classes, num_classes), dtype=torch.int64, device=device)
+    
+    with torch.no_grad():
+        for batch_X, batch_y in test_loader:
+            batch_X, batch_y = batch_X.to(device), batch_y.long().to(device)
+            
+            outputs = model(batch_X)
+            _, predicted = torch.max(outputs.data, 1)
+            
+            pred_flat = predicted.view(-1)
+            true_flat = batch_y.view(-1)
+            
+            indices = num_classes * true_flat + pred_flat
+            batch_cm = torch.bincount(indices, minlength=num_classes**2).reshape(num_classes, num_classes)
+            global_cm += batch_cm
+            
+    print("      [Metrics] Calculating performance metrics directly from GPU Confusion Matrix...")
+    cm_numpy = global_cm.cpu().numpy()
+    
+    report_lines = [f"{'':<25} {'precision':>10} {'recall':>10} {'f1-score':>10} {'support':>15}\n"]
+    macro_p, macro_r, macro_f1 = 0.0, 0.0, 0.0
+    weighted_p, weighted_r, weighted_f1 = 0.0, 0.0, 0.0
+    total_support = np.sum(cm_numpy)
+    
+    for idx, target_name in enumerate(target_names):
+        tp = cm_numpy[idx, idx]
+        fp = cm_numpy[:, idx].sum() - tp
+        fn = cm_numpy[idx, :].sum() - tp
+        support = cm_numpy[idx, :].sum()
+        
+        p = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        r = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = 2 * p * r / (p + r) if (p + r) > 0 else 0.0
+        
+        report_lines.append(f"{target_name:<25} {p:>10.4f} {r:>10.4f} {f1:>10.4f} {support:>15}")
+        macro_p += p; macro_r += r; macro_f1 += f1
+        weighted_p += p * support; weighted_r += r * support; weighted_f1 += f1 * support
+        
+    macro_p /= num_classes; macro_r /= num_classes; macro_f1 /= num_classes
+    weighted_p /= total_support if total_support > 0 else 1
+    weighted_r /= total_support if total_support > 0 else 1
+    weighted_f1 /= total_support if total_support > 0 else 1
+    accuracy = np.trace(cm_numpy) / total_support if total_support > 0 else 0.0
+    
+    report_lines.append(f"\n{'accuracy':<25} {'':>10} {'':>10} {accuracy:>10.4f} {total_support:>15}")
+    report_lines.append(f"{'macro avg':<25} {macro_p:>10.4f} {macro_r:>10.4f} {macro_f1:>10.4f} {total_support:>15}")
+    report_lines.append(f"{'weighted avg':<25} {weighted_p:>10.4f} {weighted_r:>10.4f} {weighted_f1:>10.4f} {total_support:>15}")
+    
+    with open(os.path.join(results_out_dir, f"performance_subset_{subset_id}_optuna.txt"), "w") as f:
+        f.write(f"--- Deep Learning Optimized Inference ({model_name}) ---\n\n" + "\n".join(report_lines))
+        
+    fig, ax = plt.subplots(figsize=(10, 8))
+    ConfusionMatrixDisplay(confusion_matrix=cm_numpy, display_labels=target_names).plot(ax=ax, cmap='Blues', colorbar=False)
+    plt.title(f"Confusion Matrix: {model_name} (Optuna)\n({modality} | Subset {subset_id} | pSize {patch_size})")
+    plt.xticks(rotation=45, ha='right', fontsize=9)
+    plt.tight_layout()
+    plt.savefig(os.path.join(results_out_dir, f"confusion_matrix_subset_{subset_id}_optuna.png"), dpi=300)
+    plt.close(fig)
+
+    # AGGRESSIVE GPU MEMORY CLEANUP
+    del model, initial_model_state, global_cm, outputs
+    if use_gpu and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
+
+    print(f"\nPipeline completed successfully for {model_name} on {modality.upper()} Subset {subset_id}!")
