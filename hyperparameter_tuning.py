@@ -10,6 +10,8 @@ from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import LinearSVC
+from sklearn.metrics import f1_score
+from sklearn.utils.class_weight import compute_sample_weight
 
 # NVIDIA RAPIDS cuML (GPU Models)
 try:
@@ -21,33 +23,39 @@ except ImportError:
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-# --- STANDARD ML OPTIMIZATION ---
+# STANDARD ML OPTIMIZATION
 def optimize_hyperparameters(model_name, X_train, y_train, X_val, y_val, n_trials=20, random_state=42, use_gpu=True):
     """
     Unified Optuna tuner optimized for local 8GB VRAM and 16GB RAM.
-    Bypasses OneVsRest classifiers to prevent fatal Out-Of-Memory crashes.
+    Optimizes for Macro F1-Score and applies class/sample weights to penalize majority classes.
     """
+    
+    # Precompute sample weights to use on GPU models that don't support 'class_weight' strings
+    sample_weights = compute_sample_weight(class_weight='balanced', y=y_train)
+
     def objective(trial):
         if model_name == "decision_tree":
             params = {
                 'criterion': trial.suggest_categorical('criterion', ['gini', 'entropy']),
-                'max_depth': trial.suggest_int('max_depth', 3, 15), # Capped at 15 for memory safety
+                'max_depth': trial.suggest_int('max_depth', 3, 15),
                 'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
                 'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 10),
-                'random_state': random_state
+                'random_state': random_state,
+                'class_weight': 'balanced'  # Native CPU balancing
             }
             model = DecisionTreeClassifier(**params)
 
         elif model_name == "random_forest":
             params = {
                 'n_estimators': trial.suggest_int('n_estimators', 50, 200, step=50),
-                'max_depth': trial.suggest_int('max_depth', 5, 15), # Capped at 15 for memory safety
+                'max_depth': trial.suggest_int('max_depth', 5, 15),
                 'max_features': trial.suggest_categorical('max_features', ['sqrt', 'log2']),
                 'random_state': random_state
             }
             if use_gpu:
                 model = cuRF(**params)
             else:
+                params['class_weight'] = 'balanced'
                 model = RandomForestClassifier(**params, n_jobs=1)
 
         elif model_name == "linear_svm":
@@ -57,7 +65,7 @@ def optimize_hyperparameters(model_name, X_train, y_train, X_val, y_val, n_trial
             if use_gpu:
                 model = cuSVC(C=params['C'], max_iter=1000, penalty='l2')
             else:
-                model = LinearSVC(C=params['C'], max_iter=1000, dual=False)
+                model = LinearSVC(C=params['C'], max_iter=1000, dual=False, class_weight='balanced')
 
         elif model_name == "logistic_regression":
             params = {
@@ -66,22 +74,37 @@ def optimize_hyperparameters(model_name, X_train, y_train, X_val, y_val, n_trial
             if use_gpu:
                 model = cuLR(C=params['C'], max_iter=1000)
             else:
-                model = LogisticRegression(C=params['C'], max_iter=1000, n_jobs=1)
+                model = LogisticRegression(C=params['C'], max_iter=1000, n_jobs=1, class_weight='balanced')
         else:
             raise ValueError(f"Unknown model_name: '{model_name}'")
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            model.fit(X_train, y_train)
             
-        return model.score(X_val, y_val)
+            # Scikit-learn models natively handle class weighting in their constructors
+            if isinstance(model, (DecisionTreeClassifier, RandomForestClassifier, LogisticRegression, LinearSVC)):
+                model.fit(X_train, y_train)
+            else:
+                # For cuML, we attempt to pass the mathematically computed sample weights directly
+                try:
+                    model.fit(X_train, y_train, sample_weight=sample_weights)
+                except TypeError:
+                    # If a specific cuML version rejects sample_weight, fallback to standard fit.
+                    # The Macro F1 Optuna target will still severely penalize it for missing crops.
+                    model.fit(X_train, y_train)
+            
+        # Optimize for Macro F1 instead of Overall Accuracy
+        y_val_pred = model.predict(X_val)
+        macro_f1 = f1_score(y_val, y_val_pred, average='macro')
+        
+        return macro_f1
 
     print(f"\n--- Running Optuna Tuning for {model_name} ({n_trials} Trials) ---")
     sampler = optuna.samplers.TPESampler(seed=random_state)
     study = optuna.create_study(direction="maximize", sampler=sampler)
     study.optimize(objective, n_trials=n_trials)
 
-    print(f"    [Optuna] Best Val Accuracy: {study.best_value:.4f}")
+    print(f"    [Optuna] Best Val Macro F1-Score: {study.best_value:.4f}")
     print(f"    [Optuna] Best Params: {study.best_params}")
 
     # Rebuild and train the absolute best model
@@ -90,20 +113,38 @@ def optimize_hyperparameters(model_name, X_train, y_train, X_val, y_val, n_trial
     
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        best_model.fit(X_train, y_train)
+        if isinstance(best_model, (DecisionTreeClassifier, RandomForestClassifier, LogisticRegression, LinearSVC)):
+            best_model.fit(X_train, y_train)
+        else:
+            try:
+                best_model.fit(X_train, y_train, sample_weight=sample_weights)
+            except TypeError:
+                best_model.fit(X_train, y_train)
 
     return best_model, best_params
 
 def _build_model(model_name, params, random_state, use_gpu):
-    """Instantiates the optimal model strictly using native multiclass logic."""
+    """Instantiates the optimal model incorporating native balancing where supported."""
     if model_name == "decision_tree":
-        return DecisionTreeClassifier(**params, random_state=random_state)
+        return DecisionTreeClassifier(**params, random_state=random_state, class_weight='balanced')
+        
     elif model_name == "random_forest":
-        return cuRF(**params, random_state=random_state) if use_gpu else RandomForestClassifier(**params, n_jobs=1, random_state=random_state)
+        if use_gpu:
+            return cuRF(**params, random_state=random_state)
+        else:
+            return RandomForestClassifier(**params, n_jobs=1, random_state=random_state, class_weight='balanced')
+            
     elif model_name == "linear_svm":
-        return cuSVC(C=params['C'], max_iter=1000) if use_gpu else LinearSVC(C=params['C'], max_iter=1000, dual=False)
+        if use_gpu:
+            return cuSVC(C=params['C'], max_iter=1000)
+        else:
+            return LinearSVC(C=params['C'], max_iter=1000, dual=False, class_weight='balanced')
+            
     elif model_name == "logistic_regression":
-        return cuLR(C=params['C'], max_iter=1000) if use_gpu else LogisticRegression(C=params['C'], max_iter=1000, n_jobs=1)
+        if use_gpu:
+            return cuLR(C=params['C'], max_iter=1000)
+        else:
+            return LogisticRegression(C=params['C'], max_iter=1000, n_jobs=1, class_weight='balanced')
 
 # --- DEEP LEARNING OPTIMIZATION ---
 def optimize_cnn_hyperparameters(model, train_loader, val_loader, initial_model_state, n_trials=10, epochs_per_trial=5, use_gpu=True):
@@ -119,14 +160,11 @@ def optimize_cnn_hyperparameters(model, train_loader, val_loader, initial_model_
         lr = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
         weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-2, log=True)
         
-        # Strictly enforced AdamW optimizer per requirements
         optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-            
         criterion = nn.CrossEntropyLoss()
         
         for epoch in range(epochs_per_trial):
             model.train()
-            
             train_loop = tqdm(train_loader, desc=f"Trial {trial.number} | Epoch {epoch+1}/{epochs_per_trial} [Train]", leave=False)
             
             for batch_X, batch_y in train_loop:
@@ -137,19 +175,16 @@ def optimize_cnn_hyperparameters(model, train_loader, val_loader, initial_model_
                     continue
 
                 optimizer.zero_grad()
-                
                 outputs = model(batch_X)
                 loss = criterion(outputs, batch_y)
                 loss.backward()
                 
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
-                
                 train_loop.set_postfix(loss=loss.item())
                 
             model.eval()
             correct, total = 0, 0
-            
             val_loop = tqdm(val_loader, desc=f"Trial {trial.number} | Epoch {epoch+1}/{epochs_per_trial} [Val]", leave=False)
             
             with torch.no_grad():
