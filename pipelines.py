@@ -28,6 +28,7 @@ from torch.utils.data import DataLoader
 import pandas as pd
 import cupy as cp
 import segmentation_models_pytorch as smp
+from loss import combined_loss
 
 # NVIDIA RAPIDS cuML (GPU Models)
 try:
@@ -1276,7 +1277,7 @@ def pipeline_H2Crop_unet_optuna(
 ):
     """
     Optuna-powered Deep Learning segmentation pipeline.
-    Uses Multiclass Dice Loss (ignoring background) to force the network to learn crops.
+    Uses a custom Combined Focal + Dice Loss to handle background dominance.
     Tracks Train/Test loss and saves the learning curve directly in the checkpoint folder.
     """
     print(f"\n{'='*70}")
@@ -1333,14 +1334,14 @@ def pipeline_H2Crop_unet_optuna(
     with open(os.path.join(results_out_dir, f"best_params_subset_{subset_id}.json"), "w") as f:
         json.dump(best_params, f, indent=4)
 
-    # FINAL PRODUCTION TRAINING (DICE LOSS & EPOCH CHECKPOINTS)
+    # FINAL PRODUCTION TRAINING (COMBINED LOSS & EPOCH CHECKPOINTS)
     print(f"\n--- INITIATING FINAL TRAINING: {model_name} ---")
     
     model.load_state_dict(initial_model_state)
     optimizer = optim.AdamW(model.parameters(), lr=best_params['lr'], weight_decay=best_params['weight_decay'])
     
-    # Multiclass Dice Loss. ignore_index=0 forces the model to ignore the background
-    criterion = smp.losses.DiceLoss(mode='multiclass', ignore_index=0)
+    # Link criterion directly to custom combined_loss function
+    criterion = combined_loss
     
     train_epochs = 2 if debug else final_epochs
     history_train_loss = []
@@ -1380,7 +1381,7 @@ def pipeline_H2Crop_unet_optuna(
         avg_test_loss = running_test_loss / len(test_loader)
         history_test_loss.append(avg_test_loss)
             
-        print(f"    Epoch {epoch+1}/{train_epochs} | Train Dice Loss: {avg_train_loss:.4f} | Test Dice Loss: {avg_test_loss:.4f}")
+        print(f"    Epoch {epoch+1}/{train_epochs} | Train Loss: {avg_train_loss:.4f} | Test Loss: {avg_test_loss:.4f}")
         
         # 3. Save Epoch Checkpoint
         epoch_filepath = os.path.join(checkpoint_dir, f"epoch_{epoch+1:02d}.pth")
@@ -1391,15 +1392,14 @@ def pipeline_H2Crop_unet_optuna(
     # PLOT LEARNING CURVE IN CHECKPOINT DIRECTORY
     print("\n--- GENERATING LEARNING CURVE ---")
     fig_lc, ax_lc = plt.subplots(figsize=(10, 6))
-    ax_lc.plot(range(1, train_epochs + 1), history_train_loss, label='Train Dice Loss', marker='o')
-    ax_lc.plot(range(1, train_epochs + 1), history_test_loss, label='Test Dice Loss', marker='s')
+    ax_lc.plot(range(1, train_epochs + 1), history_train_loss, label='Train Combined Loss', marker='o')
+    ax_lc.plot(range(1, train_epochs + 1), history_test_loss, label='Test Combined Loss', marker='s')
     ax_lc.set_xlabel('Epoch')
-    ax_lc.set_ylabel('Dice Loss (Lower is Better)')
+    ax_lc.set_ylabel('Combined Focal+Dice Loss (Lower is Better)')
     ax_lc.set_title(f'Learning Curve: {model_name.upper()}\n({modality} | Subset {subset_id} | pSize {patch_size})')
     ax_lc.legend()
     ax_lc.grid(True, linestyle='--', alpha=0.7)
     
-    # Changed destination: Saved directly into the specific checkpoint folder
     learning_curve_path = os.path.join(checkpoint_dir, "learning_curve.png")
     plt.tight_layout()
     plt.savefig(learning_curve_path, dpi=300)

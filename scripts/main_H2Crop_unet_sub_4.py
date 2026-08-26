@@ -23,9 +23,9 @@ if __name__ == "__main__":
     encoders = ["resnet18", "resnet50"]
     
     use_gpu = True
-    n_trials = 8            # 8         
-    epochs_per_trial = 5         
-    final_epochs = 20       # 20
+    n_trials = 15            # 15         
+    epochs_per_trial = 30    # 30     
+    final_epochs = 20        # 25
     batch_size = 32              
     debug = False                
     

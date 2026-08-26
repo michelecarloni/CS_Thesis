@@ -13,6 +13,8 @@ from sklearn.svm import LinearSVC
 from sklearn.metrics import f1_score
 from sklearn.utils.class_weight import compute_sample_weight
 import segmentation_models_pytorch as smp
+from loss import combined_loss
+from tqdm import tqdm
 
 # NVIDIA RAPIDS cuML (GPU Models)
 try:
@@ -153,7 +155,6 @@ def optimize_cnn_hyperparameters(model, train_loader, val_loader, initial_model_
     Optuna optimization logic for PyTorch CNNs utilizing Mixed Precision (AMP) and tqdm.
     Exclusively utilizes AdamW as the optimization algorithm.
     """
-    from tqdm import tqdm 
     
     def objective(trial):
         model.load_state_dict(copy.deepcopy(initial_model_state))
@@ -220,12 +221,8 @@ def optimize_unet_hyperparameters(model, train_loader, val_loader, initial_model
     """
     Optuna optimization logic specifically designed for U-Net Semantic Segmentation.
     Evaluates on Pixel-wise Macro F1-Score using a RAM-safe GPU confusion matrix.
+    Now utilizes the custom Combined Focal + Dice Loss to handle background dominance.
     """
-    import torch
-    import torch.nn as nn
-    import torch.optim as optim
-    from tqdm import tqdm 
-    import copy
     
     def objective(trial):
         # Reset model to its initial random weights before every trial
@@ -238,8 +235,6 @@ def optimize_unet_hyperparameters(model, train_loader, val_loader, initial_model
         # Strictly enforced AdamW optimizer
         optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
         
-        criterion = smp.losses.DiceLoss(mode='multiclass', ignore_index=0)
-        
         for epoch in range(epochs_per_trial):
             # TRAINING PHASE
             model.train()
@@ -248,7 +243,6 @@ def optimize_unet_hyperparameters(model, train_loader, val_loader, initial_model
             for batch_X, batch_y in train_loop:
                 if use_gpu and torch.cuda.is_available():
                     batch_X = batch_X.cuda()
-                    # U-Net targets must be long (integers) for CrossEntropyLoss
                     batch_y = batch_y.long().cuda()
                     
                 if torch.isnan(batch_X).any() or torch.isinf(batch_X).any():
@@ -259,7 +253,9 @@ def optimize_unet_hyperparameters(model, train_loader, val_loader, initial_model
                 # Forward pass: Output shape is (Batch, num_classes, 32, 32)
                 outputs = model(batch_X)
                 
-                loss = criterion(outputs, batch_y)
+                # Calculate the loss using your combined Focal + Dice function
+                loss = combined_loss(outputs, batch_y)
+                
                 loss.backward()
                 
                 # Gradient clipping to prevent exploding gradients
@@ -268,7 +264,7 @@ def optimize_unet_hyperparameters(model, train_loader, val_loader, initial_model
                 
                 train_loop.set_postfix(loss=loss.item())
                 
-            # VALIDATION PHASE RAM-SAFE MACRO F1
+            # VALIDATION PHASE (RAM-SAFE MACRO F1)
             model.eval()
             
             # Initialize a 0-MB Confusion Matrix directly on the GPU
