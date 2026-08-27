@@ -24,10 +24,10 @@ if __name__ == "__main__":
     
     use_gpu = True
     n_trials = 15            # 15         
-    epochs_per_trial = 30    # 30     
-    final_epochs = 20        # 25
+    epochs_per_trial = 15    # 15     
+    final_epochs = 40        # 40
     batch_size = 32              
-    debug = False                
+    debug = False            # False      
     
     subsets = {
         1: [8, 11, 23, 56],
