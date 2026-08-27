@@ -41,6 +41,8 @@ def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3):
     }
     subset_classes = subsets[subset_id]
     num_classes = len(subset_classes) + 1
+
+    unet_epoch = 30
     
     # COLORMAP & LEGEND SETUP
     unique_classes = [0] + sorted(subset_classes)
@@ -93,7 +95,7 @@ def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3):
                 
         # U-Net Models
         for encoder in unet_encoders:
-            checkpoint_path = os.path.join(unet_checkpoints_base, f"unet_enc_{encoder}", mod, f"subset_{subset_id}_pSize_{pSize}", "epoch_20.pth")
+            checkpoint_path = os.path.join(unet_checkpoints_base, f"unet_enc_{encoder}", mod, f"subset_{subset_id}_pSize_{pSize}", f"epoch_{unet_epoch}.pth")
             if os.path.exists(checkpoint_path):
                 model = UNet(in_channels=in_channels, num_classes=num_classes, encoder_name=encoder, encoder_depth=3).to(device)
                 model.load_state_dict(torch.load(checkpoint_path, map_location=device))
@@ -192,4 +194,7 @@ def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3):
     print(f"\nAll batched plots saved successfully to {img_out_dir}!")
 
 if __name__ == "__main__":
-    plot_inference_comparison(subset_id=1, num_samples=90, pSize=32, taxonomy=3)
+    plot_inference_comparison(subset_id=1, num_samples=30, pSize=32, taxonomy=3)
+    plot_inference_comparison(subset_id=2, num_samples=30, pSize=32, taxonomy=3)
+    plot_inference_comparison(subset_id=3, num_samples=30, pSize=32, taxonomy=3)
+    plot_inference_comparison(subset_id=4, num_samples=30, pSize=32, taxonomy=3)
