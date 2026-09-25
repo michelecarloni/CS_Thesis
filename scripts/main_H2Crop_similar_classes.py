@@ -9,7 +9,7 @@ if project_root not in sys.path:
 from H2Crop.H2Crop import H2Crop
 
 # Import your newly updated pipeline
-from pipelines import pipeline_H2Crop_standard_ML_algo
+from pipelines.pipeline_H2Crop_standard_ML_algo import pipeline_H2Crop_standard_ML_algo
 
 if __name__ == "__main__":
 

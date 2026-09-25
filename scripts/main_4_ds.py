@@ -1,4 +1,12 @@
-from pipelines import pipeline_standard_ml_algo
+import os
+import sys
+
+# Setup project root path
+project_root = os.path.abspath('..')
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
+from pipelines.pipeline_standard_ml_algo import pipeline_standard_ml_algo
 
 dataset_config = {
     'indian_pines': {

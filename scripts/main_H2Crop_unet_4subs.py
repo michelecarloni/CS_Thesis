@@ -7,7 +7,7 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 from H2Crop.H2Crop import H2Crop
-from pipelines import pipeline_H2Crop_unet_optuna
+from pipelines.pipeline_H2Crop_unet_optuna import pipeline_H2Crop_unet_optuna
 from models.unet import UNet  
 
 if __name__ == "__main__":

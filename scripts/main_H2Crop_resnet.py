@@ -8,7 +8,7 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 from H2Crop.H2Crop import H2Crop
-from pipelines import pipeline_H2Crop_CNN
+from pipelines.pipeline_H2Crop_CNN import pipeline_H2Crop_CNN
 from models.resnet18 import ResNet18
 from models.resnet50 import ResNet50
 

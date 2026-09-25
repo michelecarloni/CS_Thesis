@@ -8,10 +8,8 @@ if project_root not in sys.path:
 
 from H2Crop.H2Crop import H2Crop
 # Import both the standard baseline and the Optuna-optimized pipeline
-from pipelines import (
-    pipeline_H2Crop_standard_ML_algo_tiles, 
-    pipeline_H2Crop_standard_ML_algo_tiles_optuna
-)
+from pipelines.pipeline_H2Crop_standard_ML_algo_tiles import pipeline_H2Crop_standard_ML_algo_tiles
+from pipelines.pipeline_H2Crop_standard_ML_algo_tiles_optuna import pipeline_H2Crop_standard_ML_algo_tiles_optuna
 
 if __name__ == "__main__":
     # ==========================================

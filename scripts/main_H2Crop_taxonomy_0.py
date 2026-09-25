@@ -1,4 +1,13 @@
-from pipelines import pipeline_H2Crop_standard_ML_algo
+import os
+import sys
+
+# Setup project root path
+project_root = os.path.abspath('..')
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
+
+from pipelines.pipeline_H2Crop_standard_ML_algo import pipeline_H2Crop_standard_ML_algo
 from H2Crop import H2Crop
 import os
 
