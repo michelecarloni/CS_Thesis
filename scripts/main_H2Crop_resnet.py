@@ -8,6 +8,9 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 from H2Crop.H2Crop import H2Crop
+
+from extract_tiles_tax_based import extract_tiles_tax_based
+
 from pipelines.pipeline_H2Crop_CNN import pipeline_H2Crop_CNN
 from models.resnet18 import ResNet18
 from models.resnet50 import ResNet50
@@ -34,25 +37,8 @@ if __name__ == "__main__":
     # ==========================================
     # 1. TILE EXTRACTION PHASE
     # ==========================================
-    print("\n--- Starting Tile Extraction ---")
-    for mod in modality:
-        target_dir = os.path.join(save_tile_ds_dir, f"{mod}_taxonomy_{taxonomy}")
-        train_subfolder = os.path.join(target_dir, "train")
-        
-        # Check if the 'train' subfolder exists and has files inside it
-        if os.path.exists(train_subfolder) and len(os.listdir(train_subfolder)) > 0:
-            print(f"[*] Pre-split data already exists for {mod.upper()}. Skipping extraction. (Found at {target_dir})")
-            continue
-            
-        print(f"[*] No existing splits found for {mod.upper()}. Starting extraction & splitting...")
-        
-        loader.extract_and_save_tiles(
-            save_base_dir=save_tile_ds_dir, 
-            modality=mod, 
-            taxonomy=taxonomy, 
-            patch_size=32,
-            min_train_tiles_threshold=10000
-        )
+    extract_tiles_tax_based(modality, save_tile_ds_dir, taxonomy, loader)
+    
 
     # ==========================================
     # 2. TRAINING & TUNING PHASE

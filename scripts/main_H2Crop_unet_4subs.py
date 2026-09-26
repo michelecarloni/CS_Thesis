@@ -7,6 +7,9 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 from H2Crop.H2Crop import H2Crop
+
+from scripts.extract_tiles_4_subs import extract_4_subs_tiles
+
 from pipelines.pipeline_H2Crop_unet_optuna import pipeline_H2Crop_unet_optuna
 from models.unet import UNet  
 
@@ -42,35 +45,8 @@ if __name__ == "__main__":
     # ==========================================
     # 1. SUBSET EXTRACTION PHASE
     # ==========================================
-    print("\n--- Starting Subset Extraction Phase ---")
+    extract_4_subs_tiles(patch_sizes, subsets, modalities, loader, taxonomy)
     
-    for patch_size in patch_sizes:
-        print(f"\n{'='*60}")
-        print(f"STARTING PROCESSING FOR PATCH SIZE: {patch_size}x{patch_size}")
-        print(f"{'='*60}")
-        
-        for subset_id, subset_classes in subsets.items():
-            print(f"\n{'='*50}")
-            print(f"PROCESSING SUBSET {subset_id}: {subset_classes} (Patch Size: {patch_size})")
-            print(f"{'='*50}")
-            
-            save_base_dir = f"../ds/H2Crop_tiles_ds_subset_{subset_id}"
-            
-            for mod in modalities:
-                final_save_dir = os.path.join(save_base_dir, f"{mod}_taxonomy_{taxonomy}_pSize_{patch_size}")
-                summary_file_path = os.path.join(final_save_dir, "split_summary.txt")
-                
-                if os.path.exists(final_save_dir) and os.path.exists(summary_file_path):
-                    print(f"[*] {mod.upper()} data for Subset {subset_id} (pSize: {patch_size}) already exists. Skipping extraction.")
-                else:
-                    print(f"[*] No existing splits found for {mod.upper()} Subset {subset_id} (pSize: {patch_size}). Starting extraction...")
-                    loader.extract_and_save_tiles_subset(
-                        save_base_dir=save_base_dir, 
-                        subset_classes=subset_classes, 
-                        modality=mod, 
-                        taxonomy=taxonomy, 
-                        patch_size=patch_size
-                    )
 
     # ==========================================
     # 2. TRAINING PHASE (Deep Learning U-Net)
