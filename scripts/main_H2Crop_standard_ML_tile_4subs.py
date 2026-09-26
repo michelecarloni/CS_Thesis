@@ -24,12 +24,12 @@ if __name__ == "__main__":
     save_results_dir = "../results_6"
     use_gpu = True
     
-    use_optuna = True            
+    use_optuna = False            
     n_trials = 8                # Number of Optuna trials to run per algorithm
-    max_train_pixels = 500000    # Memory safety cap for training data
     debug = False                # Toggle to True for a rapid plumbing test (processes only 10 files)
 
     train_samples_per_class=100000,
+    val_samples_per_class=25000,
     test_samples_per_class=100000,
     
     subsets = {
@@ -74,8 +74,11 @@ if __name__ == "__main__":
                             taxonomy=taxonomy,
                             patch_size=patch_size,
                             use_gpu=use_gpu,
-                            max_train_pixels=max_train_pixels,
+                            train_samples_per_class=train_samples_per_class,
+                            val_samples_per_class=val_samples_per_class,
+                            test_samples_per_class=test_samples_per_class,
                             n_trials=n_trials,
+                            test_batch_size=50,
                             debug=debug
                         )
                     else:
