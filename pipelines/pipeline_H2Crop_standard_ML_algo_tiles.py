@@ -2,7 +2,6 @@ import os
 import gc
 import glob
 import joblib
-import random
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.tree import DecisionTreeClassifier
@@ -12,14 +11,104 @@ from sklearn.svm import LinearSVC
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 from H2Crop.data_structures import h2crop_taxonomy_dict
-from utils import load_and_flatten_segmentation_tiles
 import cupy as cp
 
-# NVIDIA RAPIDS cuML (GPU Models - Logistic Regression and Linear SVM omitted)
+# NVIDIA RAPIDS cuML (GPU Models - Only importing Random Forest)
 try:
     from cuml.ensemble import RandomForestClassifier as cuRF
 except ImportError:
     pass
+
+
+def extract_balanced_pixels_memory_safe(dataset_dir, target_samples_per_class, phase_name, debug=False):
+    """
+    Two-Pass Memory-Safe Extraction Algorithm.
+    Guarantees perfectly random 1D pixel sampling across thousands of tiles 
+    without ever loading the full dataset 'X' matrix into RAM.
+    """
+    files = glob.glob(os.path.join(dataset_dir, "*.npz"))
+    if debug:
+        files = files[:10]
+        
+    print(f"\n--- {phase_name}: Memory-Safe 1D Pixel Extraction ---")
+    print(f"      [Pass 1] Scanning {len(files)} files to compute global class distribution...")
+    
+    y_arrays = []
+    pixels_per_file = []
+    for f in files:
+        with np.load(f) as data:
+            y_flat = data['y'].flatten().astype(np.int32)
+            y_arrays.append(y_flat)
+            pixels_per_file.append(len(y_flat))
+            
+    y_global = np.concatenate(y_arrays)
+    unique_classes, class_counts = np.unique(y_global, return_counts=True)
+    
+    min_pixels_available = np.min(class_counts)
+    actual_samples = min(target_samples_per_class, min_pixels_available)
+    
+    print(f"      [Balancing] Target: {target_samples_per_class} px/class | Bottleneck: {min_pixels_available} px")
+    print(f"      [Balancing] Selectively targeting EXACTLY {actual_samples} completely random pixels per class.")
+    
+    np.random.seed(42)
+    selected_global_indices = []
+    for cls in unique_classes:
+        cls_indices = np.where(y_global == cls)[0]
+        sampled = np.random.choice(cls_indices, size=actual_samples, replace=False)
+        selected_global_indices.append(sampled)
+        
+    selected_global_indices = np.concatenate(selected_global_indices)
+    selected_global_indices.sort() 
+    
+    del y_global, y_arrays
+    gc.collect()
+    
+    print(f"      [Pass 2] Selectively extracting only the {len(selected_global_indices)} targeted pixels from disk...")
+    
+    with np.load(files[0]) as data:
+        num_features = data['X'].shape[0] 
+        
+    total_selected = len(selected_global_indices)
+    X_balanced = np.zeros((total_selected, num_features), dtype=np.float32)
+    y_balanced = np.zeros(total_selected, dtype=np.int32)
+    
+    current_global_offset = 0
+    extracted_count = 0
+    sg_idx = 0
+    
+    for f, num_pixels in zip(files, pixels_per_file):
+        file_start = current_global_offset
+        file_end = current_global_offset + num_pixels
+        
+        indices_in_file = []
+        while sg_idx < total_selected and selected_global_indices[sg_idx] < file_end:
+            indices_in_file.append(selected_global_indices[sg_idx] - file_start)
+            sg_idx += 1
+            
+        if indices_in_file:
+            with np.load(f) as data:
+                X_img = data['X'].transpose(1, 2, 0).astype(np.float32)
+                X_flat = X_img.reshape(-1, X_img.shape[-1])
+                y_flat = data['y'].flatten().astype(np.int32)
+                
+                X_chunk = X_flat[indices_in_file]
+                y_chunk = y_flat[indices_in_file]
+                
+                X_balanced[extracted_count : extracted_count + len(X_chunk)] = X_chunk
+                y_balanced[extracted_count : extracted_count + len(y_chunk)] = y_chunk
+                extracted_count += len(X_chunk)
+                
+        current_global_offset += num_pixels
+        if sg_idx >= total_selected:
+            break
+            
+    shuffle_mask = np.random.permutation(total_selected)
+    X_balanced = np.ascontiguousarray(X_balanced[shuffle_mask])
+    y_balanced = np.ascontiguousarray(y_balanced[shuffle_mask])
+    
+    print(f"      -> Extraction Complete! Final Shape: X={X_balanced.shape}, y={y_balanced.shape}")
+    return X_balanced, y_balanced
+
 
 def pipeline_H2Crop_standard_ML_algo_tiles(
     save_results_dir, 
@@ -30,20 +119,21 @@ def pipeline_H2Crop_standard_ML_algo_tiles(
     patch_size=32, 
     use_gpu=True, 
     train_samples_per_class=100000,
-    test_samples_per_class=None,
-    test_batch_size=50, 
+    test_samples_per_class=1000,
     debug=False
 ):
     """
     Trains standard Machine Learning algorithms on pixel-wise tile data.
     
-    Implements a strict bottleneck-driven undersampling strategy to extract perfectly 
-    balanced 1D pixel arrays, preventing models from collapsing on the Background class.
-    Forces Logistic Regression, Linear SVM, and Decision Tree to run on CPU to bypass 
-    cuBLAS crashes, while optionally accelerating Random Forest on the GPU.
+    Implements a rigorous OOM-proof Two-Pass undersampling strategy.
+    Linear models (Logistic Regression, Linear SVM) are hard-pinned to the CPU to avoid cuBLAS crashes.
+    Tree-based models dynamically utilize the GPU if use_gpu=True.
     """
+    if test_samples_per_class is None:
+        raise ValueError("test_samples_per_class cannot be None. It must be an integer to ensure VRAM/RAM safety.")
+
     print(f"\n{'='*70}")
-    mode = "DEBUG MODE" if debug else "PRODUCTION MODE (1D BALANCED)"
+    mode = "DEBUG MODE" if debug else "PRODUCTION MODE (STRICT IN-MEMORY 1D BALANCED)"
     print(f"STARTING ML SEGMENTATION PIPELINE FOR: {modality.upper()} | Subset {subset_id} | {mode}")
     print(f"{'='*70}")
 
@@ -51,127 +141,61 @@ def pipeline_H2Crop_standard_ML_algo_tiles(
     os.makedirs(results_out_dir, exist_ok=True)
     
     # ==========================================
-    # 1. LOAD & BALANCE TRAIN TILES
+    # 1 & 2. LOAD & BALANCE TRAIN AND TEST TILES (OOM-PROOF)
     # ==========================================
-    if debug:
-        print("Loading Train tiles (DEBUG MODE: Reading only 10 files)...")
-    else:
-        print(f"Loading Train tiles for strict pixel extraction...")
-        
-    X_train, y_train = load_and_flatten_segmentation_tiles(os.path.join(dataset_dir, "train"), debug=debug)
+    X_train, y_train = extract_balanced_pixels_memory_safe(
+        os.path.join(dataset_dir, "train"), train_samples_per_class, "Train", debug=debug
+    )
     
-    print("\n--- Physical Pixel Balancing (Training) ---")
-    unique_classes, class_counts = np.unique(y_train, return_counts=True)
-    min_pixels_available = np.min(class_counts)
-    
-    actual_train_samples = min(train_samples_per_class, min_pixels_available)
-    
-    print(f"      [Balancing Manager] Target: {train_samples_per_class} pixels/class")
-    print(f"      [Balancing Manager] Bottleneck (rarest class) has: {min_pixels_available} pixels")
-    print(f"      [Balancing Manager] Extracting EXACTLY {actual_train_samples} random pixels per class.")
-    
-    balanced_indices = []
-    np.random.seed(42)
-    
-    for cls in unique_classes:
-        cls_indices = np.where(y_train == cls)[0]
-        sampled_indices = np.random.choice(cls_indices, size=actual_train_samples, replace=False)
-        balanced_indices.append(sampled_indices)
-        
-    balanced_indices = np.concatenate(balanced_indices)
-    np.random.shuffle(balanced_indices) 
-    
-    X_train = np.ascontiguousarray(X_train[balanced_indices])
-    y_train = np.ascontiguousarray(y_train[balanced_indices])
-    
-    print(f"Final perfectly balanced Train shape: X={X_train.shape}, y={y_train.shape}")
+    X_test, y_test = extract_balanced_pixels_memory_safe(
+        os.path.join(dataset_dir, "test"), test_samples_per_class, "Test", debug=debug
+    )
 
     # ==========================================
-    # 2. SCALE FEATURES
+    # 3. SCALE FEATURES
     # ==========================================
-    print("\nFitting Scaler and scaling Train features...")
+    print("\nFitting Scaler and scaling features...")
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train).astype(np.float32)
+    X_test_scaled = scaler.transform(X_test).astype(np.float32)
+    
     y_train = y_train.astype(np.int32)
+    y_test = y_test.astype(np.int32)
     
     scaler_dir = os.path.join("..", "checkpoints", "scalers", modality)
     os.makedirs(scaler_dir, exist_ok=True)
-    scaler_filename = f"scaler_tiles_subset_{subset_id}_tax_{taxonomy}_pSize_{patch_size}.joblib"
-    joblib.dump(scaler, os.path.join(scaler_dir, scaler_filename))
+    joblib.dump(scaler, os.path.join(scaler_dir, f"scaler_tiles_subset_{subset_id}_tax_{taxonomy}_pSize_{patch_size}.joblib"))
     
-    del X_train
+    del X_train, X_test
     gc.collect()
-
-    # ==========================================
-    # 3. PRE-PROCESS TEST DATA
-    # ==========================================
-    print("\n--- PREPARING EVALUATION DATA ---")
-    X_test_balanced, y_test_balanced = None, None
-    test_files = []
-    
-    if test_samples_per_class is not None:
-        print(f"[Memory Manager] Loading ALL test tiles for strict pixel balancing (Target: {test_samples_per_class}/class)...")
-        X_test_raw, y_test_raw = load_and_flatten_segmentation_tiles(os.path.join(dataset_dir, "test"), debug=debug)
-        
-        unique_classes_test, class_counts_test = np.unique(y_test_raw, return_counts=True)
-        min_pixels_test = np.min(class_counts_test)
-        actual_test_samples = min(test_samples_per_class, min_pixels_test)
-        
-        print(f"      [Balancing Manager] Test Bottleneck: {min_pixels_test} pixels.")
-        print(f"      [Balancing Manager] Extracting EXACTLY {actual_test_samples} random pixels per class.")
-        
-        balanced_test_indices = []
-        for cls in unique_classes_test:
-            cls_indices = np.where(y_test_raw == cls)[0]
-            sampled_indices = np.random.choice(cls_indices, size=actual_test_samples, replace=False)
-            balanced_test_indices.append(sampled_indices)
-            
-        balanced_test_indices = np.concatenate(balanced_test_indices)
-        np.random.shuffle(balanced_test_indices)
-        
-        X_test_balanced = np.ascontiguousarray(X_test_raw[balanced_test_indices])
-        y_test_balanced = np.ascontiguousarray(y_test_raw[balanced_test_indices])
-        
-        del X_test_raw, y_test_raw
-        gc.collect()
-        
-        print(f"Final perfectly balanced Test shape: X={X_test_balanced.shape}, y={y_test_balanced.shape}")
-    else:
-        print(f"[Memory Manager] Preparing imbalanced spatial data for streaming batches...")
-        test_files = glob.glob(os.path.join(dataset_dir, "test", "*.npz"))
-        random.seed(42)
-        random.shuffle(test_files)
-        
-        if debug:
-            test_files = test_files[:10]
 
     # ==========================================
     # 4. LAZY MODEL INITIALIZATION
     # ==========================================
-    # Force Decision Tree, Logistic Regression, and Linear SVM to always use CPU
     model_configs = {
-        "decision_tree": lambda: DecisionTreeClassifier(max_depth=15, random_state=42),
+        # Linear models are strictly pinned to Scikit-Learn (CPU)
         "logistic_regression": lambda: LogisticRegression(max_iter=1000, n_jobs=-1, random_state=42),
         "linear_svm": lambda: LinearSVC(max_iter=1000, dual=False, random_state=42)
     }
-    
+
     if use_gpu:
+        model_configs["decision_tree"] = lambda: cuRF(n_estimators=1, max_depth=15, max_features=1.0, random_state=42)
         model_configs["random_forest"] = lambda: cuRF(n_estimators=150, max_depth=15, max_features='sqrt', random_state=42)
     else:
+        model_configs["decision_tree"] = lambda: DecisionTreeClassifier(max_depth=15, random_state=42)
         model_configs["random_forest"] = lambda: RandomForestClassifier(n_estimators=100, max_depth=15, n_jobs=-1, random_state=42)
 
     subset_classes = np.unique(y_train)
     taxonomy_key = f'Taxonomy_{taxonomy}'
     current_taxonomy = h2crop_taxonomy_dict.get(taxonomy_key, {})
     target_names = [current_taxonomy.get(c, f"Class {c}") if c != 0 else "Background (0)" for c in subset_classes]
-    
-    cpu_only_models = ["decision_tree", "logistic_regression", "linear_svm"]
+
+    # Models that must never touch the GPU
+    cpu_only_models = ["logistic_regression", "linear_svm"]
 
     # ==========================================
     # 5. LINEAR ALGORITHM PASS (Train -> Eval -> Save)
     # ==========================================
-    total_batches = (len(test_files) // test_batch_size) + 1 if not test_samples_per_class else 1
-
     for algo_name, model_fn in model_configs.items():
         print(f"\n{'-'*50}")
         print(f"PROCESSING ALGORITHM: {algo_name.upper()}")
@@ -181,7 +205,6 @@ def pipeline_H2Crop_standard_ML_algo_tiles(
         print(f"--> Training {algo_name}...")
         model = model_fn()
         
-        # Manually push data to GPU for cuML models only
         if use_gpu and algo_name not in cpu_only_models:
             X_train_gpu = cp.asarray(X_train_scaled)
             model.fit(X_train_gpu, y_train)
@@ -190,58 +213,17 @@ def pipeline_H2Crop_standard_ML_algo_tiles(
             model.fit(X_train_scaled, y_train)
 
         # 5B. EVALUATE
-        mode_str = "Balanced" if test_samples_per_class else "Imbalanced Streaming"
-        print(f"--> Evaluating {algo_name} on Test Set ({mode_str})...")
+        print(f"--> Evaluating {algo_name} on strictly balanced Test Set...")
         
-        global_cm = np.zeros((len(subset_classes), len(subset_classes)), dtype=np.int64)
-        
-        if test_samples_per_class is not None:
-            # Evaluate strictly balanced in-memory Test Set
-            for i in range(0, len(X_test_balanced), test_batch_size * 1000):
-                X_batch = X_test_balanced[i:i + test_batch_size * 1000]
-                y_batch = y_test_balanced[i:i + test_batch_size * 1000]
-                
-                X_batch_scaled = np.ascontiguousarray(scaler.transform(X_batch).astype(np.float32))
-                
-                if use_gpu and algo_name not in cpu_only_models:
-                    X_batch_gpu = cp.asarray(X_batch_scaled)
-                    y_pred = model.predict(X_batch_gpu)
-                    y_pred = cp.asnumpy(y_pred)
-                    del X_batch_gpu
-                else:
-                    y_pred = model.predict(X_batch_scaled)
-                    
-                global_cm += confusion_matrix(y_batch, y_pred, labels=subset_classes)
-                
+        if use_gpu and algo_name not in cpu_only_models:
+            X_test_gpu = cp.asarray(X_test_scaled)
+            y_pred = model.predict(X_test_gpu)
+            y_pred = cp.asnumpy(y_pred)
+            del X_test_gpu
         else:
-            # Evaluate imbalanced streaming Test Set directly from disk
-            for batch_idx, i in enumerate(range(0, len(test_files), test_batch_size)):
-                if batch_idx % 10 == 0:
-                    print(f"      [Progress] Processing batch {batch_idx}/{total_batches}...")
-
-                batch_paths = test_files[i:i+test_batch_size]
-                X_batch_list, y_batch_list = [], []
-                
-                for f in batch_paths:
-                    with np.load(f) as data:
-                        X_img = data['X'].transpose(1, 2, 0).astype(np.float32)
-                        X_batch_list.append(X_img.reshape(-1, X_img.shape[-1]))
-                        y_batch_list.append(data['y'].flatten().astype(np.int32))
-                    
-                X_batch = np.vstack(X_batch_list)
-                y_batch = np.concatenate(y_batch_list)
-                
-                X_batch_scaled = np.ascontiguousarray(scaler.transform(X_batch).astype(np.float32))
-                
-                if use_gpu and algo_name not in cpu_only_models:
-                    X_batch_gpu = cp.asarray(X_batch_scaled)
-                    y_pred = model.predict(X_batch_gpu)
-                    y_pred = cp.asnumpy(y_pred)
-                    del X_batch_gpu
-                else:
-                    y_pred = model.predict(X_batch_scaled)
-                
-                global_cm += confusion_matrix(y_batch, y_pred, labels=subset_classes)
+            y_pred = model.predict(X_test_scaled)
+            
+        global_cm = confusion_matrix(y_test, y_pred, labels=subset_classes)
 
         # 5C. METRICS & REPORTS
         print("      [Metrics] Calculating performance metrics directly from Confusion Matrix...")

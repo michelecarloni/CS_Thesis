@@ -30,7 +30,7 @@ if __name__ == "__main__":
 
     train_samples_per_class=100000,
     val_samples_per_class=25000,
-    test_samples_per_class=100000,
+    test_samples_per_class=100,
     
     subsets = {
         1: [8, 11, 23, 56],
@@ -92,7 +92,6 @@ if __name__ == "__main__":
                             use_gpu=use_gpu,
                             train_samples_per_class=train_samples_per_class,
                             test_samples_per_class=test_samples_per_class,
-                            test_batch_size=50, 
                             debug=debug
                         )
                 else:
