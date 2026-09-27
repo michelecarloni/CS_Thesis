@@ -24,7 +24,7 @@ if __name__ == "__main__":
     save_results_dir = "../results_6"
     use_gpu = True
     
-    use_optuna = False            
+    use_optuna = True            
     n_trials = 8                # Number of Optuna trials to run per algorithm
     debug = False                # Toggle to True for a rapid plumbing test (processes only 10 files)
 
@@ -78,7 +78,6 @@ if __name__ == "__main__":
                             val_samples_per_class=val_samples_per_class,
                             test_samples_per_class=test_samples_per_class,
                             n_trials=n_trials,
-                            test_batch_size=50,
                             debug=debug
                         )
                     else:
