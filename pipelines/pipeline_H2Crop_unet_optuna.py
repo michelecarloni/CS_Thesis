@@ -1,30 +1,22 @@
 import os
 import sys
-
-# Setup project root path
-project_root = os.path.abspath('..')
-if project_root not in sys.path:
-    sys.path.append(project_root)
-    
 import json
 import gc
-import copy
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import ConfusionMatrixDisplay
 from H2Crop.data_structures import h2crop_taxonomy_dict
 from H2Crop.H2CropTileDataset import H2CropTileDataset
 from hyperparams_tuning.optimize_unet_hyperparameters import optimize_unet_hyperparameters
+from models.unet import UNet  
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from loss import combined_loss
 
-
-
-
 def pipeline_H2Crop_unet_optuna(
-    model, 
+    in_channels,
+    encoder_name,
     model_name,
     save_results_dir, 
     dataset_dir, 
@@ -41,9 +33,9 @@ def pipeline_H2Crop_unet_optuna(
     debug=False
 ):
     """
-    Optuna-powered Deep Learning segmentation pipeline.
-    Uses a custom Combined Focal + Dice Loss to handle background dominance.
-    Tracks Train/Test loss and saves the learning curve directly in the checkpoint folder.
+    Optuna-powered Deep Learning segmentation pipeline[cite: 3].
+    Dynamically tunes U-Net architecture depth alongside learning rates, 
+    then trains the optimal configuration using a Combined Focal + Dice Loss[cite: 3].
     """
     print(f"\n{'='*70}")
     mode = "DEBUG MODE" if debug else "PRODUCTION MODE (DEEP LEARNING)"
@@ -53,11 +45,9 @@ def pipeline_H2Crop_unet_optuna(
     results_out_dir = os.path.join(save_results_dir, modality)
     os.makedirs(results_out_dir, exist_ok=True)
     
-    # RESTRUCTURED CHECKPOINT DIRECTORY
     checkpoint_dir = os.path.join("..", "checkpoints", model_name, modality, f"subset_{subset_id}_pSize_{patch_size}")
     os.makedirs(checkpoint_dir, exist_ok=True)
     
-    # LAZY DATALOADER INITIALIZATION
     print("\n--- Initializing PyTorch DataLoaders ---")
     
     train_dataset = H2CropTileDataset(os.path.join(dataset_dir, "train"), subset_classes=subset_classes, debug=debug)
@@ -77,19 +67,16 @@ def pipeline_H2Crop_unet_optuna(
     device = torch.device("cuda" if use_gpu and torch.cuda.is_available() else "cpu")
     print(f"Compute Device: {device}")
 
-    # MODEL SETUP
-    model = model.to(device)
-    initial_model_state = copy.deepcopy(model.state_dict())
-
-    # OPTUNA HYPERPARAMETER TUNING
+    # OPTUNA HYPERPARAMETER TUNING (Now handles dynamic model building)
     active_trials = 2 if debug else n_trials
     active_epochs = 1 if debug else epochs_per_trial
     
     best_params = optimize_unet_hyperparameters(
-        model=model,
+        model_name=model_name,
+        in_channels=in_channels,
+        encoder_name=encoder_name,
         train_loader=train_loader,
         val_loader=val_loader,
-        initial_model_state=initial_model_state,
         num_classes=num_classes,
         n_trials=active_trials,
         epochs_per_trial=active_epochs,
@@ -99,13 +86,17 @@ def pipeline_H2Crop_unet_optuna(
     with open(os.path.join(results_out_dir, f"best_params_subset_{subset_id}.json"), "w") as f:
         json.dump(best_params, f, indent=4)
 
-    # FINAL PRODUCTION TRAINING (COMBINED LOSS & EPOCH CHECKPOINTS)
-    print(f"\n--- INITIATING FINAL TRAINING: {model_name} ---")
+    # FINAL PRODUCTION TRAINING (Using tuned depth and optimizer parameters)
+    print(f"\n--- INITIATING FINAL TRAINING: {model_name} (Depth: {best_params['encoder_depth']}) ---")
     
-    model.load_state_dict(initial_model_state)
+    model = UNet(
+        in_channels=in_channels,
+        num_classes=num_classes,
+        encoder_name=encoder_name,
+        encoder_depth=best_params['encoder_depth']
+    ).to(device)
+    
     optimizer = optim.AdamW(model.parameters(), lr=best_params['lr'], weight_decay=best_params['weight_decay'])
-    
-    # Link criterion directly to custom combined_loss function
     criterion = combined_loss
     
     train_epochs = 2 if debug else final_epochs
@@ -113,7 +104,6 @@ def pipeline_H2Crop_unet_optuna(
     history_test_loss = []
     
     for epoch in range(train_epochs):
-        # 1. Training Step
         model.train()
         running_train_loss = 0.0
         
@@ -132,7 +122,6 @@ def pipeline_H2Crop_unet_optuna(
         avg_train_loss = running_train_loss / len(train_loader)
         history_train_loss.append(avg_train_loss)
         
-        # 2. Test Loss Evaluation Step
         model.eval()
         running_test_loss = 0.0
         
@@ -148,13 +137,12 @@ def pipeline_H2Crop_unet_optuna(
             
         print(f"    Epoch {epoch+1}/{train_epochs} | Train Loss: {avg_train_loss:.4f} | Test Loss: {avg_test_loss:.4f}")
         
-        # 3. Save Epoch Checkpoint
         epoch_filepath = os.path.join(checkpoint_dir, f"epoch_{epoch+1:02d}.pth")
         torch.save(model.state_dict(), epoch_filepath)
         
     print(f"    Saved {train_epochs} epoch checkpoints to: {checkpoint_dir}")
 
-    # PLOT LEARNING CURVE IN CHECKPOINT DIRECTORY
+    # PLOT LEARNING CURVE
     print("\n--- GENERATING LEARNING CURVE ---")
     fig_lc, ax_lc = plt.subplots(figsize=(10, 6))
     ax_lc.plot(range(1, train_epochs + 1), history_train_loss, label='Train Combined Loss', marker='o')
@@ -171,7 +159,7 @@ def pipeline_H2Crop_unet_optuna(
     plt.close(fig_lc)
     print(f"    Saved Learning Curve to: {learning_curve_path}")
 
-    # RAM-SAFE TEST EVALUATION
+    # TEST EVALUATION
     print(f"\n--- EVALUATING ON TEST SET ---")
     model.eval()
     global_cm = torch.zeros((num_classes, num_classes), dtype=torch.int64, device=device)
@@ -233,8 +221,7 @@ def pipeline_H2Crop_unet_optuna(
     plt.savefig(os.path.join(results_out_dir, f"confusion_matrix_subset_{subset_id}_optuna.png"), dpi=300)
     plt.close(fig)
 
-    # AGGRESSIVE GPU MEMORY CLEANUP
-    del model, initial_model_state, global_cm, outputs
+    del model, global_cm, outputs
     if use_gpu and torch.cuda.is_available():
         torch.cuda.empty_cache()
     gc.collect()

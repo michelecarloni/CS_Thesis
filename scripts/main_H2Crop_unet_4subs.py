@@ -20,7 +20,7 @@ if __name__ == "__main__":
     modalities = ["hyperspectral", "multispectral"]
     taxonomy = 3
     patch_sizes = [32]
-    save_results_dir = "../results_5"
+    save_results_dir = "../results_6"
     
     # New: Define encoders to test
     encoders = ["resnet18", "resnet50"]
@@ -28,7 +28,7 @@ if __name__ == "__main__":
     use_gpu = True
     n_trials = 15            # 15         
     epochs_per_trial = 15    # 15     
-    final_epochs = 40        # 40
+    final_epochs = 30        # 40
     batch_size = 32              
     debug = False            # False      
     
@@ -73,15 +73,9 @@ if __name__ == "__main__":
                         
                         print(f"\nInitializing {model_name} for {mod.upper()} Subset {subset_id}...")
                         
-                        model = UNet(
-                            in_channels=in_channels, 
-                            num_classes=num_classes, 
-                            encoder_name=encoder, 
-                            encoder_depth=3
-                        )
-                        
                         pipeline_H2Crop_unet_optuna(
-                            model=model,
+                            in_channels=in_channels,
+                            encoder_name=encoder,
                             model_name=model_name,
                             save_results_dir=current_results_dir,
                             dataset_dir=dataset_dir,
