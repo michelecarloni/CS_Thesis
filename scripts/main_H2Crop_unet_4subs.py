@@ -20,7 +20,7 @@ if __name__ == "__main__":
     modalities = ["hyperspectral", "multispectral"]
     taxonomy = 3
     patch_sizes = [256]
-    valid_threshold=0.20
+    valid_threshold=0.05
     save_results_dir = "../results_6"
     
     # New: Define encoders to test

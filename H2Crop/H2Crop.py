@@ -468,12 +468,12 @@ class H2Crop:
 
     def _split_balanced_segmentation_tiles(self, tile_stats, base_dir, subset_classes, temp_dir):
         """
-        Frequency-aware splitting algorithm.
-        Identifies the rarest crop in each tile (its 'signature'), groups tiles by signature, 
-        and splits each group 60/20/20 to guarantee proportional distribution of rare crops.
+        Frequency-aware splitting algorithm based on GLOBAL dataset rarity.
+        Ensures globally rare crops are properly stratified across 60/20/20 splits.
         """
         import random
         import shutil
+        import os
         
         print("\n--- Frequency-Aware Split (60/20/20) ---")
         train_dir = os.path.join(base_dir, "train")
@@ -483,24 +483,42 @@ class H2Crop:
         for d in [train_dir, val_dir, test_dir]:
             os.makedirs(d, exist_ok=True)
 
-        signature_groups = {c: [] for c in subset_classes}
-        
-        # 1. Identify the 'signature' (rarest crop) for each valid tile
+        # STEP 1: Determine Global Rarity
+        print("1. Calculating Global Rarity Hierarchy...")
+        global_counts = {c: 0 for c in subset_classes}
         for stat in tile_stats:
             hist = stat['hist']
-            valid_counts = {c: hist[c] for c in subset_classes if c in hist and hist[c] > 0}
+            for c in subset_classes:
+                global_counts[c] += hist.get(c, 0)
+                
+        # Sort subset classes from the absolute rarest to the most abundant
+        global_hierarchy = sorted(subset_classes, key=lambda c: global_counts[c])
+        print(f"   Hierarchy (Rarest -> Most Abundant): {global_hierarchy}")
+
+        # STEP 2 & 3: Assign Signatures & Group
+        print("2 & 3. Assigning Signatures and Grouping...")
+        signature_groups = {c: [] for c in subset_classes}
+        
+        for stat in tile_stats:
+            hist = stat['hist']
+            # Find which target crops are actually physically present in this tile
+            present_crops = [c for c in subset_classes if hist.get(c, 0) > 0]
             
-            if not valid_counts:
+            if not present_crops:
                 continue
                 
-            signature_crop = min(valid_counts, key=valid_counts.get)
+            # The signature is the crop that appears EARLIEST in our globally rare list
+            signature_crop = min(present_crops, key=lambda c: global_hierarchy.index(c))
             signature_groups[signature_crop].append(stat)
-            
-        # 2. Shuffle and split each signature group 60/20/20
+
+        # STEP 4: Stratified Splitting
+        print("4. Stratified Splitting (60/20/20)...")
         random.seed(42)
         tiles_train, tiles_val, tiles_test = 0, 0, 0
         
-        for crop, tiles in signature_groups.items():
+        # Iterate through the groups starting from the rarest pile
+        for crop in global_hierarchy:
+            tiles = signature_groups[crop]
             random.shuffle(tiles)
             n = len(tiles)
             
@@ -529,11 +547,12 @@ class H2Crop:
         if not os.listdir(temp_dir):
             os.rmdir(temp_dir)
 
-        # 3. Write Summary
+        # Write Summary
         summary_path = os.path.join(base_dir, "split_summary.txt")
         with open(summary_path, "w") as f:
             f.write("--- Frequency-Aware Segmentation Extraction Summary ---\n")
             f.write(f"Subset Classes: {subset_classes}\n")
+            f.write(f"Global Hierarchy (Rarest -> Abundant): {global_hierarchy}\n")
             f.write(f"Total Tiles Extracted: {len(tile_stats)}\n\n")
 
             f.write("--- Tile Distribution ---\n")
@@ -542,7 +561,7 @@ class H2Crop:
             f.write(f"Test Tiles: {tiles_test}\n\n")
 
             f.write("--- Signature Group Sizes ---\n")
-            for c in subset_classes:
+            for c in global_hierarchy:
                 f.write(f"Class {c:2d} Signature Tiles: {len(signature_groups[c])}\n")
 
         print(f"\nExtraction and splitting complete. Summary saved to: {summary_path}")
