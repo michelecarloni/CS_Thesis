@@ -12,7 +12,8 @@ from models.unet import UNet
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from loss import combined_loss
+
+from loss import CombinedLoss
 
 def pipeline_H2Crop_unet_optuna(
     in_channels,
@@ -32,11 +33,6 @@ def pipeline_H2Crop_unet_optuna(
     batch_size=32, 
     debug=False
 ):
-    """
-    Optuna-powered Deep Learning segmentation pipeline[cite: 3].
-    Dynamically tunes U-Net architecture depth alongside learning rates, 
-    then trains the optimal configuration using a Combined Focal + Dice Loss[cite: 3].
-    """
     print(f"\n{'='*70}")
     mode = "DEBUG MODE" if debug else "PRODUCTION MODE (DEEP LEARNING)"
     print(f"STARTING PIPELINE FOR: {model_name.upper()} | {modality.upper()} | Subset {subset_id} | {mode}")
@@ -49,7 +45,6 @@ def pipeline_H2Crop_unet_optuna(
     os.makedirs(checkpoint_dir, exist_ok=True)
     
     print("\n--- Initializing PyTorch DataLoaders ---")
-    
     train_dataset = H2CropTileDataset(os.path.join(dataset_dir, "train"), subset_classes=subset_classes, debug=debug)
     val_dataset = H2CropTileDataset(os.path.join(dataset_dir, "validation"), subset_classes=subset_classes, debug=debug)
     test_dataset = H2CropTileDataset(os.path.join(dataset_dir, "test"), subset_classes=subset_classes, debug=debug)
@@ -67,7 +62,27 @@ def pipeline_H2Crop_unet_optuna(
     device = torch.device("cuda" if use_gpu and torch.cuda.is_available() else "cpu")
     print(f"Compute Device: {device}")
 
-    # OPTUNA HYPERPARAMETER TUNING (Now handles dynamic model building)
+    # DYNAMIC ALPHA WEIGHT CALCULATION    
+    print("\n--- Computing Class Weights for Focal Loss ---")
+    class_counts = torch.zeros(num_classes)
+    for _, batch_y in train_loader:
+        class_counts += torch.bincount(batch_y.view(-1), minlength=num_classes)
+        
+    # Calculate inverse frequency (adding a tiny epsilon to prevent division by zero)
+    alpha = 1.0 / (class_counts + 1e-6)
+    
+    # Strictly isolate the background class
+    alpha[0] = 0.0 
+    
+    # Normalize the crop weights so they sum to 1.0 (maintains stable learning rates)
+    crop_alpha_sum = alpha[1:].sum()
+    if crop_alpha_sum > 0:
+        alpha[1:] = alpha[1:] / crop_alpha_sum
+        
+    alpha = alpha.to(device)
+    print(f"    Computed Alpha Tensor: {alpha.cpu().numpy()}")
+
+    # OPTUNA HYPERPARAMETER TUNING
     active_trials = 2 if debug else n_trials
     active_epochs = 1 if debug else epochs_per_trial
     
@@ -78,6 +93,7 @@ def pipeline_H2Crop_unet_optuna(
         train_loader=train_loader,
         val_loader=val_loader,
         num_classes=num_classes,
+        alpha_weights=alpha,       # Pass alpha to Optuna tuner
         n_trials=active_trials,
         epochs_per_trial=active_epochs,
         use_gpu=use_gpu
@@ -86,7 +102,7 @@ def pipeline_H2Crop_unet_optuna(
     with open(os.path.join(results_out_dir, f"best_params_subset_{subset_id}.json"), "w") as f:
         json.dump(best_params, f, indent=4)
 
-    # FINAL PRODUCTION TRAINING (Using tuned depth and optimizer parameters)
+    # FINAL PRODUCTION TRAINING
     print(f"\n--- INITIATING FINAL TRAINING: {model_name} (Depth: {best_params['encoder_depth']}) ---")
     
     model = UNet(
@@ -97,7 +113,9 @@ def pipeline_H2Crop_unet_optuna(
     ).to(device)
     
     optimizer = optim.AdamW(model.parameters(), lr=best_params['lr'], weight_decay=best_params['weight_decay'])
-    criterion = combined_loss
+    
+    # Instantiate the custom loss with our calculated weights
+    criterion = CombinedLoss(alpha=alpha, ignore_index=0)
     
     train_epochs = 2 if debug else final_epochs
     history_train_loss = []
