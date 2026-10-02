@@ -1,6 +1,6 @@
 import os
 
-def extract_4_subs_tiles(patch_sizes, subsets, modalities, loader, taxonomy):
+def extract_4_subs_tiles(patch_sizes, subsets, modalities, loader, taxonomy, valid_threshold):
     print("\n--- Starting Subset Extraction Phase ---")
     # Outer loop for iterating over different patch sizes
     for patch_size in patch_sizes:
@@ -33,5 +33,6 @@ def extract_4_subs_tiles(patch_sizes, subsets, modalities, loader, taxonomy):
                         subset_classes=subset_classes, 
                         modality=mod, 
                         taxonomy=taxonomy, 
-                        patch_size=patch_size
+                        patch_size=patch_size,
+                        valid_threshold=valid_threshold
                     )

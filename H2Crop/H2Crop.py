@@ -342,10 +342,10 @@ class H2Crop:
         return sorted(kept_classes)
 
 
-    def extract_and_save_tiles_subset(self, save_base_dir, subset_classes, modality="hyperspectral", taxonomy=3, patch_size=32, max_files=None, max_workers=None):
+    def extract_and_save_tiles_subset(self, save_base_dir, subset_classes, modality="hyperspectral", taxonomy=3, patch_size=32, max_files=None, max_workers=None, valid_threshold=0.40):
         """
-        Extracts tiles containing specific subset classes using CPU Multiprocessing, 
-        masks all other pixels to 0 (Background), and delegates splitting to a pixel-balancing algorithm.
+        Extracts tiles containing specific subset classes using CPU Multiprocessing.
+        Upsamples if patch_size > 192, and applies a strict valid area threshold.
         """
         import concurrent.futures
         from functools import partial
@@ -364,47 +364,46 @@ class H2Crop:
             
         print(f"\n--- Extracting {patch_size}x{patch_size} Segmentation Tiles ({modality}) ---")
         print(f"Target Subset Classes: {subset_classes}")
+        print(f"Area Threshold: >= {valid_threshold*100}% of tile must be target crops")
         print(f"Saving to: {final_save_dir}")
         
         tile_stats = [] 
         
-        # Partially apply the fixed arguments so map() only needs to pass the filename
         worker_func = partial(
             self._process_single_h5_file, 
             taxonomy=taxonomy, 
             modality=modality, 
             patch_size=patch_size, 
             subset_classes=subset_classes, 
-            temp_dir=temp_dir
+            temp_dir=temp_dir,
+            valid_threshold=valid_threshold # NEW: Pass the threshold
         )
         
-        # Fire up the CPU Multiprocessing Pool
         with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
-            # Map the worker function to the files and wrap with tqdm for a progress bar
             results = list(tqdm(
                 executor.map(worker_func, h5_files), 
                 total=len(h5_files), 
                 desc=f"Extracting ({os.cpu_count() or 4} Cores)"
             ))
             
-        # Flatten the list of lists returned by the multiprocessing workers
         for res in results:
             if res:
                 tile_stats.extend(res)
                 
-        print(f"\nExtraction complete! Found {len(tile_stats)} valid tiles containing subset classes.")
+        print(f"\nExtraction complete! Found {len(tile_stats)} valid tiles meeting the {valid_threshold*100}% threshold.")
         
-        # Proceed to the greedy splitting logic we wrote earlier
         self._split_balanced_segmentation_tiles(tile_stats, final_save_dir, subset_classes, temp_dir)
 
 
-    def _process_single_h5_file(self, filename, taxonomy, modality, patch_size, subset_classes, temp_dir):
+    def _process_single_h5_file(self, filename, taxonomy, modality, patch_size, subset_classes, temp_dir, valid_threshold=0.40):
         """
-        Worker function for multiprocessing. Processes a single .h5 file independently,
-        extracts valid tiles, masks background pixels, and returns its statistical histogram.
+        Worker function for multiprocessing. Processes a single .h5 file independently.
+        Dynamically upsamples images if patch_size > native resolution, enforces an area 
+        threshold, and masks background pixels.
         """
         import h5py
         import numpy as np
+        import scipy.ndimage
         
         file_path = os.path.join(self.h5_dir, filename)
         sample_id = filename.replace('.h5', '')
@@ -417,22 +416,41 @@ class H2Crop:
                 
                 if modality.lower() == "hyperspectral":
                     image_array = np.array(h5f['EnMAP_data'])
-                    image_array = self.upsample_hyperspectral(image_array)
+                    image_array = self.upsample_hyperspectral(image_array) # Brings it to 192x192
                 elif modality.lower() == "multispectral":
                     s2_full = np.array(h5f['S2_data'])
                     month_str = filename[4:6]
                     s2_time_index = int(month_str) - 1
-                    image_array = s2_full[s2_time_index]
+                    image_array = s2_full[s2_time_index] # Natively 192x192
                 
                 _, h, w = image_array.shape
+                
+                
+                # DYNAMIC UPSAMPLING FOR LARGE PATCHES
+                # If requested patch size (e.g., 256) is bigger than native size (192)
+                if patch_size > h:
+                    zoom_factor = patch_size / h
+                    
+                    # order=0 applies Nearest-Neighbor interpolation. 
+                    # This guarantees no spectral mixing for feature bands and no decimal corruption for labels.
+                    image_array = scipy.ndimage.zoom(image_array, (1, zoom_factor, zoom_factor), order=0)
+                    mask_array = scipy.ndimage.zoom(mask_array, (zoom_factor, zoom_factor), order=0)
+                    
+                    # Update dimensions for the slicing loop
+                    _, h, w = image_array.shape
                 
                 tile_idx = 0
                 for i in range(0, h - patch_size + 1, patch_size):
                     for j in range(0, w - patch_size + 1, patch_size):
                         mask_patch = mask_array[i:i+patch_size, j:j+patch_size].copy()
                         
-                        # Check if tile has AT LEAST ONE pixel of our target subset
-                        if not np.any(np.isin(mask_patch, subset_classes)):
+                        # NEW: STRICT AREA THRESHOLD LOGIC
+                        total_pixels = patch_size * patch_size
+                        target_pixels = np.sum(np.isin(mask_patch, subset_classes))
+                        pixel_ratio = target_pixels / total_pixels
+                        
+                        # Drop the tile entirely if it doesn't meet the target concentration
+                        if pixel_ratio < valid_threshold:
                             continue
                             
                         # MASKING: Convert any pixel NOT in the subset to 0 (Background)
