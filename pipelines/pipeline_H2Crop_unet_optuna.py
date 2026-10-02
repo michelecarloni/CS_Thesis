@@ -12,6 +12,7 @@ from models.unet import UNet
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from loss import CombinedLoss
 
@@ -65,7 +66,9 @@ def pipeline_H2Crop_unet_optuna(
     # DYNAMIC ALPHA WEIGHT CALCULATION    
     print("\n--- Computing Class Weights for Focal Loss ---")
     class_counts = torch.zeros(num_classes)
-    for _, batch_y in train_loader:
+    
+    # Wrap train_loader with tqdm for a visual progress bar
+    for _, batch_y in tqdm(train_loader, desc="Scanning Train Set for Alpha Weights"):
         class_counts += torch.bincount(batch_y.view(-1), minlength=num_classes)
         
     # Calculate inverse frequency (adding a tiny epsilon to prevent division by zero)
