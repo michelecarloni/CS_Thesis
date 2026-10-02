@@ -30,7 +30,7 @@ if __name__ == "__main__":
     n_trials = 15            # 15         
     epochs_per_trial = 15    # 15     
     final_epochs = 30        # 40
-    batch_size = 32              
+    batch_size = 8              
     debug = False            # False      
     
     subsets = {
@@ -47,8 +47,6 @@ if __name__ == "__main__":
     # 1. SUBSET EXTRACTION PHASE
     # ==========================================
     extract_4_subs_tiles(patch_sizes, subsets, modalities, loader, taxonomy, valid_threshold)
-
-    sys.exit(0)
 
     # ==========================================
     # 2. TRAINING PHASE (Deep Learning U-Net)
