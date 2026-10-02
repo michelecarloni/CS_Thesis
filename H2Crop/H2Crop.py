@@ -345,7 +345,8 @@ class H2Crop:
     def extract_and_save_tiles_subset(self, save_base_dir, subset_classes, modality="hyperspectral", taxonomy=3, patch_size=32, max_files=None, max_workers=None, valid_threshold=0.40):
         """
         Extracts tiles containing specific subset classes using CPU Multiprocessing.
-        Upsamples if patch_size > 192, and applies a strict valid area threshold.
+        Upsamples HSI using bilinear interpolation, symmetrically pads the area to 256x256, 
+        and drops tiles failing the area threshold.
         """
         import concurrent.futures
         from functools import partial
@@ -376,7 +377,7 @@ class H2Crop:
             patch_size=patch_size, 
             subset_classes=subset_classes, 
             temp_dir=temp_dir,
-            valid_threshold=valid_threshold # NEW: Pass the threshold
+            valid_threshold=valid_threshold
         )
         
         with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
@@ -390,16 +391,15 @@ class H2Crop:
             if res:
                 tile_stats.extend(res)
                 
-        print(f"\nExtraction complete! Found {len(tile_stats)} valid tiles meeting the {valid_threshold*100}% threshold.")
+        print(f"\nExtraction complete! Found {len(tile_stats)} valid tiles meeting the threshold.")
         
         self._split_balanced_segmentation_tiles(tile_stats, final_save_dir, subset_classes, temp_dir)
 
 
     def _process_single_h5_file(self, filename, taxonomy, modality, patch_size, subset_classes, temp_dir, valid_threshold=0.40):
         """
-        Worker function for multiprocessing. Processes a single .h5 file independently.
-        Dynamically upsamples images if patch_size > native resolution, enforces an area 
-        threshold, and masks background pixels.
+        Processes a single .h5 file. Upsamples HSI to 192x192, symmetrically pads to 256x256, 
+        and extracts tiles. Threshold math now explicitly ignores synthetic padding.
         """
         import h5py
         import numpy as np
@@ -416,47 +416,39 @@ class H2Crop:
                 
                 if modality.lower() == "hyperspectral":
                     image_array = np.array(h5f['EnMAP_data'])
-                    image_array = self.upsample_hyperspectral(image_array) # Brings it to 192x192
+                    # Upsample HSI from 64x64 to 192x192 using bilinear interpolation (order=1)
+                    image_array = scipy.ndimage.zoom(image_array, (1, 3.0, 3.0), order=1)
                 elif modality.lower() == "multispectral":
                     s2_full = np.array(h5f['S2_data'])
                     month_str = filename[4:6]
                     s2_time_index = int(month_str) - 1
-                    image_array = s2_full[s2_time_index] # Natively 192x192
+                    image_array = s2_full[s2_time_index]
+                
+                # 256x256 Expansion: Symmetric padding for images, Class 0 for the label mask
+                pad_h, pad_w = 32, 32 
+                image_array = np.pad(image_array, ((0, 0), (pad_h, pad_h), (pad_w, pad_w)), mode='symmetric')
+                mask_array = np.pad(mask_array, ((pad_h, pad_h), (pad_w, pad_w)), mode='constant', constant_values=0)
                 
                 _, h, w = image_array.shape
-                
-                
-                # DYNAMIC UPSAMPLING FOR LARGE PATCHES
-                # If requested patch size (e.g., 256) is bigger than native size (192)
-                if patch_size > h:
-                    zoom_factor = patch_size / h
-                    
-                    # order=0 applies Nearest-Neighbor interpolation. 
-                    # This guarantees no spectral mixing for feature bands and no decimal corruption for labels.
-                    image_array = scipy.ndimage.zoom(image_array, (1, zoom_factor, zoom_factor), order=0)
-                    mask_array = scipy.ndimage.zoom(mask_array, (zoom_factor, zoom_factor), order=0)
-                    
-                    # Update dimensions for the slicing loop
-                    _, h, w = image_array.shape
                 
                 tile_idx = 0
                 for i in range(0, h - patch_size + 1, patch_size):
                     for j in range(0, w - patch_size + 1, patch_size):
                         mask_patch = mask_array[i:i+patch_size, j:j+patch_size].copy()
                         
-                        # NEW: STRICT AREA THRESHOLD LOGIC
-                        total_pixels = patch_size * patch_size
+                        # Calculate ratio based on true sensor area, ignoring the synthetic padding
+                        effective_area = (192 * 192) if patch_size > 192 else (patch_size * patch_size)
                         target_pixels = np.sum(np.isin(mask_patch, subset_classes))
-                        pixel_ratio = target_pixels / total_pixels
+                        pixel_ratio = target_pixels / effective_area
                         
-                        # Drop the tile entirely if it doesn't meet the target concentration
+                        # Discard the tile if target crops fall below the threshold
                         if pixel_ratio < valid_threshold:
                             continue
                             
                         # MASKING: Convert any pixel NOT in the subset to 0 (Background)
                         mask_patch[~np.isin(mask_patch, subset_classes)] = 0
                         
-                        # Calculate pixel histogram for this specific tile
+                        # Calculate pixel histogram for frequency-aware splitting
                         unique, counts = np.unique(mask_patch, return_counts=True)
                         hist = dict(zip(unique, counts))
                         
@@ -476,12 +468,14 @@ class H2Crop:
 
     def _split_balanced_segmentation_tiles(self, tile_stats, base_dir, subset_classes, temp_dir):
         """
-        Greedily distributes tiles to Train/Val/Test to ensure the total number of PIXELS
-        per class in Train and Val are perfectly balanced. Remaining valid tiles go to Test.
-        Generates a summary text file in the base_dir.
+        Frequency-aware splitting algorithm.
+        Identifies the rarest crop in each tile (its 'signature'), groups tiles by signature, 
+        and splits each group 60/20/20 to guarantee proportional distribution of rare crops.
         """
-        print("\n--- Balancing Pixels for Segmentation Split ---")
-
+        import random
+        import shutil
+        
+        print("\n--- Frequency-Aware Split (60/20/20) ---")
         train_dir = os.path.join(base_dir, "train")
         val_dir = os.path.join(base_dir, "validation")
         test_dir = os.path.join(base_dir, "test")
@@ -489,69 +483,56 @@ class H2Crop:
         for d in [train_dir, val_dir, test_dir]:
             os.makedirs(d, exist_ok=True)
 
-        # 1. Calculate global pixel availability for the subset
-        global_pixel_counts = {c: 0 for c in subset_classes}
+        signature_groups = {c: [] for c in subset_classes}
+        
+        # 1. Identify the 'signature' (rarest crop) for each valid tile
         for stat in tile_stats:
-            for c in subset_classes:
-                global_pixel_counts[c] += stat['hist'].get(c, 0)
-
-        # 2. Find the bottleneck (the rarest class in the subset)
-        rarest_class = min(global_pixel_counts, key=global_pixel_counts.get)
-        rarest_count = global_pixel_counts[rarest_class]
-
-        # 3. Define pixel targets based on the rarest class (70% Train, 20% Val)
-        train_target = int(rarest_count * 0.70)
-        val_target   = int(rarest_count * 0.20)
-
-        current_train = {c: 0 for c in subset_classes}
-        current_val   = {c: 0 for c in subset_classes}
-
-        tiles_train = 0
-        tiles_val = 0
-        tiles_test = 0
-
-        import random
-        random.seed(42)
-        random.shuffle(tile_stats) # Shuffle to prevent spatial bias
-
-        # 4. Greedy Allocation Loop
-        for stat in tqdm(tile_stats, desc="Routing Tiles"):
-            filepath = stat['path']
             hist = stat['hist']
-            filename = os.path.basename(filepath)
-
-            # Check if this tile fits in TRAIN without overflowing any subset class target
-            fits_in_train = all(current_train[c] + hist.get(c, 0) <= train_target for c in subset_classes)
-
-            if fits_in_train:
-                for c in subset_classes:
-                    current_train[c] += hist.get(c, 0)
-                shutil.move(filepath, os.path.join(train_dir, filename))
+            valid_counts = {c: hist[c] for c in subset_classes if c in hist and hist[c] > 0}
+            
+            if not valid_counts:
+                continue
+                
+            signature_crop = min(valid_counts, key=valid_counts.get)
+            signature_groups[signature_crop].append(stat)
+            
+        # 2. Shuffle and split each signature group 60/20/20
+        random.seed(42)
+        tiles_train, tiles_val, tiles_test = 0, 0, 0
+        
+        for crop, tiles in signature_groups.items():
+            random.shuffle(tiles)
+            n = len(tiles)
+            
+            train_end = int(n * 0.60)
+            val_end = int(n * 0.80)
+            
+            train_split = tiles[:train_end]
+            val_split = tiles[train_end:val_end]
+            test_split = tiles[val_end:]
+            
+            for stat in train_split:
+                filename = os.path.basename(stat['path'])
+                shutil.move(stat['path'], os.path.join(train_dir, filename))
                 tiles_train += 1
-                continue
-
-            # Check if this tile fits in VAL without overflowing any subset class target
-            fits_in_val = all(current_val[c] + hist.get(c, 0) <= val_target for c in subset_classes)
-
-            if fits_in_val:
-                for c in subset_classes:
-                    current_val[c] += hist.get(c, 0)
-                shutil.move(filepath, os.path.join(val_dir, filename))
+                
+            for stat in val_split:
+                filename = os.path.basename(stat['path'])
+                shutil.move(stat['path'], os.path.join(val_dir, filename))
                 tiles_val += 1
-                continue
+                
+            for stat in test_split:
+                filename = os.path.basename(stat['path'])
+                shutil.move(stat['path'], os.path.join(test_dir, filename))
+                tiles_test += 1
 
-            # If it overflows both, dump it into the unbalanced TEST set
-            shutil.move(filepath, os.path.join(test_dir, filename))
-            tiles_test += 1
-
-        # Clean up temporary directory
         if not os.listdir(temp_dir):
             os.rmdir(temp_dir)
 
-        # 5. Write Summary to Text File
+        # 3. Write Summary
         summary_path = os.path.join(base_dir, "split_summary.txt")
         with open(summary_path, "w") as f:
-            f.write("--- Segmentation Dataset Extraction Summary ---\n")
+            f.write("--- Frequency-Aware Segmentation Extraction Summary ---\n")
             f.write(f"Subset Classes: {subset_classes}\n")
             f.write(f"Total Tiles Extracted: {len(tile_stats)}\n\n")
 
@@ -560,17 +541,11 @@ class H2Crop:
             f.write(f"Validation Tiles: {tiles_val}\n")
             f.write(f"Test Tiles: {tiles_test}\n\n")
 
-            f.write("--- Pixel Balancing Targets ---\n")
-            f.write(f"Rarest Class: {rarest_class} (Total Pixels Available: {rarest_count})\n")
-            f.write(f"Train Target (70%): {train_target} pixels/class\n")
-            f.write(f"Val Target (20%):   {val_target} pixels/class\n\n")
-
-            f.write("--- Final Pixel Counts per Class ---\n")
+            f.write("--- Signature Group Sizes ---\n")
             for c in subset_classes:
-                f.write(f"Class {c:2d} -> Train: {current_train[c]:6d} | Val: {current_val[c]:6d}\n")
-            f.write("\nNote: All tiles that overflowed the strict pixel targets were routed to the Test set.\n")
+                f.write(f"Class {c:2d} Signature Tiles: {len(signature_groups[c])}\n")
 
-        print(f"\nExtraction and balancing complete. Summary saved to: {summary_path}")
+        print(f"\nExtraction and splitting complete. Summary saved to: {summary_path}")
 
     def get_file_list(self, from_train, limit, path=None):
         """
