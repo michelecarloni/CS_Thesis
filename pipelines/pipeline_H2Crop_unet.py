@@ -33,7 +33,7 @@ def pipeline_H2Crop_unet(
     debug=False
 ):
     print(f"\n{'='*70}")
-    mode = "DEBUG MODE" if debug else "PRODUCTION MODE (NO OPTUNA)"
+    mode = "DEBUG MODE" if debug else "PRODUCTION MODE (FIXED HYPERPARAMS)"
     print(f"STARTING PIPELINE FOR: {model_name.upper()} | {modality.upper()} | Subset {subset_id} | {mode}")
     print(f"{'='*70}")
 
@@ -91,7 +91,7 @@ def pipeline_H2Crop_unet(
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     criterion = CombinedLoss(alpha=alpha, ignore_index=0)
     
-    # Initialize the AMP Scaler to prevent VRAM explosion
+    # Initialize the modern AMP Scaler
     scaler = torch.amp.GradScaler('cuda', enabled=use_gpu and torch.cuda.is_available())
     
     train_epochs = 2 if debug else epochs
@@ -99,6 +99,7 @@ def pipeline_H2Crop_unet(
     history_test_loss = []
     
     for epoch in range(train_epochs):
+        
         # 1. TRAINING PHASE
         model.train()
         running_train_loss = 0.0
@@ -107,37 +108,38 @@ def pipeline_H2Crop_unet(
         for batch_X, batch_y in train_loop:
             batch_X, batch_y = batch_X.to(device), batch_y.long().to(device)
             
-            # SENSOR GUARD: Skip batches with corrupted EnMAP data
+            # SENSOR GUARD: Skip corrupted EnMAP data
             if torch.isnan(batch_X).any() or torch.isinf(batch_X).any():
                 continue
                 
+            # DYNAMIC NORMALIZATION: Prevent FP16 overflow by scaling raw reflectance to N(0,1)
+            b_mean = batch_X.mean(dim=(2, 3), keepdim=True)
+            b_std = batch_X.std(dim=(2, 3), keepdim=True)
+            batch_X = (batch_X - b_mean) / (b_std + 1e-5)
+            
             optimizer.zero_grad()
             
-            # Cast the forward pass to FP16 to save memory
+            # Cast the forward pass to FP16
             with torch.amp.autocast('cuda', enabled=use_gpu):
                 outputs = model(batch_X)
                 loss = criterion(outputs, batch_y)
                 
-            # Backward pass using the scaled loss
             scaler.scale(loss).backward()
-            
-            # Unscale gradients before clipping to prevent gradient explosion
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
             scaler.step(optimizer)
             scaler.update()
             
             running_train_loss += loss.item()
             train_loop.set_postfix(loss=f"{loss.item():.4f}")
             
-            # Aggressive VRAM cleanup
             del batch_X, batch_y, outputs, loss
             
         avg_train_loss = running_train_loss / len(train_loader)
         history_train_loss.append(avg_train_loss)
         
-        # 2. VALIDATION PHASE (Test set acts as validation here)
+        
+        # 2. VALIDATION PHASE
         model.eval()
         running_test_loss = 0.0
         
@@ -145,6 +147,13 @@ def pipeline_H2Crop_unet(
         with torch.no_grad():
             for batch_X, batch_y in test_loop:
                 batch_X, batch_y = batch_X.to(device), batch_y.long().to(device)
+                
+                # SENSOR GUARD & NORMALIZATION
+                if torch.isnan(batch_X).any() or torch.isinf(batch_X).any():
+                    continue
+                b_mean = batch_X.mean(dim=(2, 3), keepdim=True)
+                b_std = batch_X.std(dim=(2, 3), keepdim=True)
+                batch_X = (batch_X - b_mean) / (b_std + 1e-5)
                 
                 with torch.amp.autocast('cuda', enabled=use_gpu):
                     outputs = model(batch_X)
@@ -165,7 +174,8 @@ def pipeline_H2Crop_unet(
         
     print(f"    Saved {train_epochs} epoch checkpoints to: {checkpoint_dir}")
 
-    # PLOT LEARNING CURVE
+    
+    # 3. PLOT LEARNING CURVE
     print("\n--- GENERATING LEARNING CURVE ---")
     fig_lc, ax_lc = plt.subplots(figsize=(10, 6))
     ax_lc.plot(range(1, train_epochs + 1), history_train_loss, label='Train Combined Loss', marker='o')
@@ -182,7 +192,8 @@ def pipeline_H2Crop_unet(
     plt.close(fig_lc)
     print(f"    Saved Learning Curve to: {learning_curve_path}")
 
-    # TEST EVALUATION
+    
+    # 4. TEST EVALUATION
     print(f"\n--- EVALUATING ON TEST SET ---")
     model.eval()
     global_cm = torch.zeros((num_classes, num_classes), dtype=torch.int64, device=device)
@@ -191,6 +202,13 @@ def pipeline_H2Crop_unet(
     with torch.no_grad():
         for batch_X, batch_y in eval_loop:
             batch_X, batch_y = batch_X.to(device), batch_y.long().to(device)
+            
+            # SENSOR GUARD & NORMALIZATION
+            if torch.isnan(batch_X).any() or torch.isinf(batch_X).any():
+                continue
+            b_mean = batch_X.mean(dim=(2, 3), keepdim=True)
+            b_std = batch_X.std(dim=(2, 3), keepdim=True)
+            batch_X = (batch_X - b_mean) / (b_std + 1e-5)
             
             with torch.amp.autocast('cuda', enabled=use_gpu):
                 outputs = model(batch_X)
