@@ -7,11 +7,11 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 from H2Crop.H2Crop import H2Crop
-
 from scripts.extract_tiles_4_subs import extract_4_subs_tiles
 
+# Import both pipelines
 from pipelines.pipeline_H2Crop_unet_optuna import pipeline_H2Crop_unet_optuna
-from models.unet import UNet  
+from pipelines.pipeline_H2Crop_unet import pipeline_H2Crop_unet
 
 if __name__ == "__main__":
     # ==========================================
@@ -19,19 +19,20 @@ if __name__ == "__main__":
     # ==========================================
     modalities = ["hyperspectral", "multispectral"]
     taxonomy = 3
-    patch_sizes = [256]
-    valid_threshold=0.05
+    patch_sizes = [64]
+    valid_threshold = 0.05
     save_results_dir = "../results_6"
     
-    # New: Define encoders to test
     encoders = ["resnet18", "resnet50"]
     
     use_gpu = True
-    n_trials = 15            # 15         
-    epochs_per_trial = 15    # 15     
-    final_epochs = 30        # 40
-    batch_size = 8              
-    debug = False            # False      
+    use_optuna = True      # Toggle Optuna
+    
+    n_trials = 15
+    epochs_per_trial = 15
+    final_epochs = 30
+    batch_size = 8
+    debug = False
     
     subsets = {
         1: [8, 11, 23, 56],
@@ -53,11 +54,9 @@ if __name__ == "__main__":
     # ==========================================
     print("\n--- Starting Deep Learning Phase (U-Net) ---")
     
-    # Outer loop: Iterate through encoders as requested
     for encoder in encoders:
         for patch_size in patch_sizes:
             
-            # Construct the exact results directory format: e.g., results_5/unet_enc_resnet18_32
             current_results_dir = os.path.join(save_results_dir, f"unet_enc_{encoder}_{patch_size}")
             
             for subset_id, subset_classes in subsets.items():
@@ -73,23 +72,45 @@ if __name__ == "__main__":
                         
                         print(f"\nInitializing {model_name} for {mod.upper()} Subset {subset_id}...")
                         
-                        pipeline_H2Crop_unet_optuna(
-                            in_channels=in_channels,
-                            encoder_name=encoder,
-                            model_name=model_name,
-                            save_results_dir=current_results_dir,
-                            dataset_dir=dataset_dir,
-                            subset_id=subset_id,
-                            subset_classes=subset_classes,
-                            modality=mod,
-                            taxonomy=taxonomy,
-                            patch_size=patch_size,
-                            use_gpu=use_gpu,
-                            n_trials=n_trials,
-                            epochs_per_trial=epochs_per_trial,
-                            final_epochs=final_epochs,
-                            batch_size=batch_size,
-                            debug=debug
-                        )
+                        if use_optuna:
+                            pipeline_H2Crop_unet_optuna(
+                                in_channels=in_channels,
+                                encoder_name=encoder,
+                                model_name=model_name,
+                                save_results_dir=current_results_dir,
+                                dataset_dir=dataset_dir,
+                                subset_id=subset_id,
+                                subset_classes=subset_classes,
+                                modality=mod,
+                                taxonomy=taxonomy,
+                                patch_size=patch_size,
+                                use_gpu=use_gpu,
+                                n_trials=n_trials,
+                                epochs_per_trial=epochs_per_trial,
+                                final_epochs=final_epochs,
+                                batch_size=batch_size,
+                                debug=debug
+                            )
+                        else:
+                            # Standard Training (No Optuna)
+                            pipeline_H2Crop_unet(
+                                in_channels=in_channels,
+                                encoder_name=encoder,
+                                model_name=model_name,
+                                save_results_dir=current_results_dir,
+                                dataset_dir=dataset_dir,
+                                subset_id=subset_id,
+                                subset_classes=subset_classes,
+                                modality=mod,
+                                taxonomy=taxonomy,
+                                patch_size=patch_size,
+                                use_gpu=use_gpu,
+                                epochs=final_epochs,
+                                batch_size=batch_size,
+                                encoder_depth=3,      # Fixed architecture depth
+                                lr=1e-3,              # Fixed learning rate
+                                weight_decay=1e-4,    # Fixed weight decay
+                                debug=debug
+                            )
                     else:
                         print(f"[Error] Dataset directory {dataset_dir} missing. Skipping training for this config.")
