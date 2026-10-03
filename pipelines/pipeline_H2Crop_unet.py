@@ -106,6 +106,11 @@ def pipeline_H2Crop_unet(
         train_loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{train_epochs} [Train]", leave=False)
         for batch_X, batch_y in train_loop:
             batch_X, batch_y = batch_X.to(device), batch_y.long().to(device)
+            
+            # SENSOR GUARD: Skip batches with corrupted EnMAP data
+            if torch.isnan(batch_X).any() or torch.isinf(batch_X).any():
+                continue
+                
             optimizer.zero_grad()
             
             # Cast the forward pass to FP16 to save memory
