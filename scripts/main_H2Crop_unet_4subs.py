@@ -19,7 +19,7 @@ if __name__ == "__main__":
     # ==========================================
     modalities = ["hyperspectral", "multispectral"]
     taxonomy = 3
-    patch_sizes = [256]
+    patch_sizes = [64]
     valid_threshold = 0.05
     save_results_dir = "../results_6"
     
@@ -31,7 +31,7 @@ if __name__ == "__main__":
     n_trials = 10
     epochs_per_trial = 15
     final_epochs = 20
-    batch_size = 8        # 32 - pSize: 64 | 8 - pSize: 256
+    batch_size = 32        # 32 - pSize: 64 | 8 - pSize: 256
     debug = False
     
     subsets = {
