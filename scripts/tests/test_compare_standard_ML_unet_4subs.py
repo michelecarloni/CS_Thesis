@@ -17,10 +17,19 @@ if project_root not in sys.path:
 from models.unet import UNet  
 from H2Crop.data_structures import h2crop_taxonomy_dict
 
+# EXTERNAL CONFIGURATION VARIABLES
+patch_size = 64
+dataset_base = "../../ds"
+ml_checkpoints_base = "Absolute_path"
+unet_checkpoints_base = "/media/michele/T7/checkpoints/checkpoints_6_unet_4subs_optuna_focal_dice_patch_size_64_train_balanced"
+img_out_dir = "../../img"
+
+
 def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3):
     """
     Generates comparative plots combining Hyperspectral and Multispectral rows in the SAME image.
-    Batches up to 3 samples per modality per image (max 6 rows per image).
+    Interleaves the rows: HSI Sample 1, MSI Sample 1, HSI Sample 2, MSI Sample 2, etc.
+    Utilizes external global variables for paths and configurations.
     """
     print(f"\n{'='*70}")
     print(f"GENERATING COMBINED INFERENCE PLOTS | Subset {subset_id} | pSize {pSize}")
@@ -58,15 +67,13 @@ def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3):
     raw_to_plot_idx = {raw: idx for idx, raw in enumerate(unique_classes)}
     map_to_plot = np.vectorize(lambda x: raw_to_plot_idx.get(x, 0)) 
 
-    dataset_base = f"../../ds/H2Crop_tiles_ds_subset_{subset_id}"
-    ml_checkpoints_base = "../../../Thesis/checkpoints/checkpoints_5_standard_ML_tiles_4_subs_optuna_target_overallAccuracy"
-    unet_checkpoints_base = "../../../Thesis/checkpoints/checkpoints_5_unet_4subs_optuna_focal_dice"
-    img_out_dir = "../../img"
+    # Construct the specific dataset path dynamically using the external dataset_base
+    current_dataset_base = os.path.join(dataset_base, f"H2Crop_tiles_ds_subset_{subset_id}")
     os.makedirs(img_out_dir, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # LOAD EVERYTHING UPRONT
+    # LOAD EVERYTHING UPFRONT
     print("\n--- Loading Models & Sampling Files ---")
     scalers = {}
     ml_networks = {"hyperspectral": {}, "multispectral": {}}
@@ -76,24 +83,24 @@ def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3):
     for mod in modalities:
         in_channels = 218 if mod == "hyperspectral" else 10
         
-        # Files
-        test_dir = os.path.join(dataset_base, f"{mod}_taxonomy_{taxonomy}_pSize_{pSize}", "test")
+        # Files (using the dynamically constructed current_dataset_base)
+        test_dir = os.path.join(current_dataset_base, f"{mod}_taxonomy_{taxonomy}_pSize_{pSize}", "test")
         test_files = glob.glob(os.path.join(test_dir, "*.npz"))
         if test_files:
             sampled_files[mod] = random.sample(test_files, min(num_samples, len(test_files)))
             
-        # Scaler
+        # Scaler (using external ml_checkpoints_base)
         scaler_path = os.path.join(ml_checkpoints_base, "scalers", mod, f"scaler_tiles_subset_{subset_id}_tax_{taxonomy}_pSize_{pSize}.joblib")
         if os.path.exists(scaler_path):
             scalers[mod] = joblib.load(scaler_path)
             
-        # ML Models
+        # ML Models (using external ml_checkpoints_base)
         for ml_algo in ml_models:
             ml_model_path = os.path.join(ml_checkpoints_base, ml_algo, mod, f"{ml_algo}_tiles_subset_{subset_id}_optuna.joblib")
             if os.path.exists(ml_model_path):
                 ml_networks[mod][ml_algo] = joblib.load(ml_model_path)
                 
-        # U-Net Models
+        # U-Net Models (using external unet_checkpoints_base)
         for encoder in unet_encoders:
             checkpoint_path = os.path.join(unet_checkpoints_base, f"unet_enc_{encoder}", mod, f"subset_{subset_id}_pSize_{pSize}", f"epoch_{unet_epoch}.pth")
             if os.path.exists(checkpoint_path):
@@ -124,12 +131,20 @@ def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3):
         
         current_row = 0
         
-        # Loop through both modalities to populate the rows sequentially
-        for mod in modalities:
-            chunk = hyper_chunk if mod == "hyperspectral" else multi_chunk
-            in_channels = 218 if mod == "hyperspectral" else 10
-            
-            for file_idx, file_path in enumerate(chunk):
+        # Loop through file indices first, THEN modalities to interleave them
+        max_chunk_len = max(len(hyper_chunk), len(multi_chunk))
+        
+        for file_idx in range(max_chunk_len):
+            for mod in modalities:
+                chunk = hyper_chunk if mod == "hyperspectral" else multi_chunk
+                
+                # Skip if this modality doesn't have a file at this index
+                if file_idx >= len(chunk):
+                    continue
+                    
+                file_path = chunk[file_idx]
+                in_channels = 218 if mod == "hyperspectral" else 10
+                
                 with np.load(file_path) as data:
                     X_raw = data['X'] 
                     y_true = data['y']
@@ -137,7 +152,7 @@ def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3):
                 H, W = y_true.shape
                 predictions = [y_true]
                 
-                # A) ML Inference
+                # ML Inference
                 X_flat = X_raw.reshape(in_channels, -1).T
                 if mod in scalers:
                     X_flat = scalers[mod].transform(X_flat)
@@ -149,7 +164,7 @@ def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3):
                     else:
                         predictions.append(np.zeros((H, W)))
                         
-                # B) U-Net Inference
+                # U-Net Inference
                 with torch.no_grad():
                     X_tensor = torch.tensor(X_raw, dtype=torch.float32).unsqueeze(0).to(device)
                     for encoder in unet_encoders:
@@ -161,7 +176,7 @@ def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3):
                         else:
                             predictions.append(np.zeros((H, W)))
 
-                # C) Plot Row
+                # Plot Row
                 for col_idx, (pred_raw_grid, title) in enumerate(zip(predictions, titles)):
                     ax = axes[current_row, col_idx]
                     pred_plot_grid = map_to_plot(pred_raw_grid)
@@ -182,7 +197,7 @@ def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3):
                 
                 current_row += 1
                 
-        # D) Add Legend & Finalize
+        # Add Legend & Finalize
         plt.tight_layout(rect=[0, 0.08, 1, 1])
         fig.legend(handles=legend_patches, loc='lower center', ncol=len(unique_classes), 
                    bbox_to_anchor=(0.5, 0.02), fontsize=14, frameon=False)
@@ -194,7 +209,8 @@ def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3):
     print(f"\nAll batched plots saved successfully to {img_out_dir}!")
 
 if __name__ == "__main__":
-    plot_inference_comparison(subset_id=1, num_samples=30, pSize=32, taxonomy=3)
-    plot_inference_comparison(subset_id=2, num_samples=30, pSize=32, taxonomy=3)
-    plot_inference_comparison(subset_id=3, num_samples=30, pSize=32, taxonomy=3)
-    plot_inference_comparison(subset_id=4, num_samples=30, pSize=32, taxonomy=3)
+    # Ensure we use the global patch_size variable for the script execution
+    plot_inference_comparison(subset_id=1, num_samples=30, pSize=patch_size, taxonomy=3)
+    plot_inference_comparison(subset_id=2, num_samples=30, pSize=patch_size, taxonomy=3)
+    plot_inference_comparison(subset_id=3, num_samples=30, pSize=patch_size, taxonomy=3)
+    plot_inference_comparison(subset_id=4, num_samples=30, pSize=patch_size, taxonomy=3)
