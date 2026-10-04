@@ -11,7 +11,8 @@ import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from loss import CombinedLoss
+
+from loss import OriginalCombinedLoss
 
 def pipeline_H2Crop_unet(
     in_channels,
@@ -61,23 +62,6 @@ def pipeline_H2Crop_unet(
     device = torch.device("cuda" if use_gpu and torch.cuda.is_available() else "cpu")
     print(f"Compute Device: {device}")
 
-    # DYNAMIC ALPHA WEIGHT CALCULATION    
-    print("\n--- Computing Class Weights for Focal Loss ---")
-    class_counts = torch.zeros(num_classes)
-    
-    for _, batch_y in tqdm(train_loader, desc="Scanning Train Set for Alpha Weights"):
-        class_counts += torch.bincount(batch_y.view(-1), minlength=num_classes)
-        
-    alpha = 1.0 / (class_counts + 1e-6)
-    alpha[0] = 0.0 
-    
-    crop_alpha_sum = alpha[1:].sum()
-    if crop_alpha_sum > 0:
-        alpha[1:] = alpha[1:] / crop_alpha_sum
-        
-    alpha = alpha.to(device)
-    print(f"    Computed Alpha Tensor: {alpha.cpu().numpy()}")
-
     # FINAL PRODUCTION TRAINING
     print(f"\n--- INITIATING FINAL TRAINING: {model_name} (Depth: {encoder_depth}) ---")
     
@@ -89,7 +73,9 @@ def pipeline_H2Crop_unet(
     ).to(device)
     
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    criterion = CombinedLoss(alpha=alpha, ignore_index=0)
+    
+    # Instantiate the original loss (no alpha weights, evaluates background)
+    criterion = OriginalCombinedLoss()
     
     # Initialize the modern AMP Scaler
     scaler = torch.amp.GradScaler('cuda', enabled=use_gpu and torch.cuda.is_available())
@@ -99,7 +85,7 @@ def pipeline_H2Crop_unet(
     history_test_loss = []
     
     for epoch in range(train_epochs):
-        
+
         # 1. TRAINING PHASE
         model.train()
         running_train_loss = 0.0
@@ -138,7 +124,7 @@ def pipeline_H2Crop_unet(
         avg_train_loss = running_train_loss / len(train_loader)
         history_train_loss.append(avg_train_loss)
         
-        
+
         # 2. VALIDATION PHASE
         model.eval()
         running_test_loss = 0.0
@@ -174,14 +160,14 @@ def pipeline_H2Crop_unet(
         
     print(f"    Saved {train_epochs} epoch checkpoints to: {checkpoint_dir}")
 
-    
+
     # 3. PLOT LEARNING CURVE
     print("\n--- GENERATING LEARNING CURVE ---")
     fig_lc, ax_lc = plt.subplots(figsize=(10, 6))
     ax_lc.plot(range(1, train_epochs + 1), history_train_loss, label='Train Combined Loss', marker='o')
     ax_lc.plot(range(1, train_epochs + 1), history_test_loss, label='Test Combined Loss', marker='s')
     ax_lc.set_xlabel('Epoch')
-    ax_lc.set_ylabel('Combined Focal+Dice Loss (Lower is Better)')
+    ax_lc.set_ylabel('Original Focal+Dice Loss (Lower is Better)')
     ax_lc.set_title(f'Learning Curve: {model_name.upper()}\n({modality} | Subset {subset_id} | pSize {patch_size})')
     ax_lc.legend()
     ax_lc.grid(True, linestyle='--', alpha=0.7)
@@ -192,7 +178,7 @@ def pipeline_H2Crop_unet(
     plt.close(fig_lc)
     print(f"    Saved Learning Curve to: {learning_curve_path}")
 
-    
+
     # 4. TEST EVALUATION
     print(f"\n--- EVALUATING ON TEST SET ---")
     model.eval()

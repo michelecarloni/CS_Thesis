@@ -6,15 +6,15 @@ import torch.nn as nn
 import torch.optim as optim
 
 from models.unet import UNet 
-from loss import CombinedLoss
+from loss import OriginalCombinedLoss
 from tqdm import tqdm
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-def optimize_unet_hyperparameters(model_name, in_channels, encoder_name, train_loader, val_loader, num_classes, alpha_weights, n_trials=10, epochs_per_trial=5, use_gpu=True):
+def optimize_unet_hyperparameters(model_name, in_channels, encoder_name, train_loader, val_loader, num_classes, n_trials=10, epochs_per_trial=5, use_gpu=True):
     """
     Optuna optimization logic specifically designed for U-Net Semantic Segmentation.
-    Instantiates the CombinedLoss dynamically with the calculated alpha weights.
+    Instantiates the OriginalCombinedLoss dynamically (evaluates all pixels, including background).
     """
     
     def objective(trial):
@@ -35,8 +35,11 @@ def optimize_unet_hyperparameters(model_name, in_channels, encoder_name, train_l
         
         optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
         
-        # Instantiate loss inside the trial using the passed-in weights
-        criterion = CombinedLoss(alpha=alpha_weights, ignore_index=0)
+        # Instantiate the original loss (no alpha weights, no ignore index)
+        criterion = OriginalCombinedLoss()
+        
+        # Initialize the modern AMP Scaler for Optuna trials
+        scaler = torch.amp.GradScaler('cuda', enabled=use_gpu and torch.cuda.is_available())
         
         for epoch in range(epochs_per_trial):
             # TRAINING PHASE
@@ -48,15 +51,26 @@ def optimize_unet_hyperparameters(model_name, in_channels, encoder_name, train_l
                     batch_X = batch_X.cuda()
                     batch_y = batch_y.long().cuda()
                     
+                # SENSOR GUARD: Skip corrupted EnMAP data
                 if torch.isnan(batch_X).any() or torch.isinf(batch_X).any():
                     continue
 
+                # DYNAMIC NORMALIZATION to prevent FP16 overflow
+                b_mean = batch_X.mean(dim=(2, 3), keepdim=True)
+                b_std = batch_X.std(dim=(2, 3), keepdim=True)
+                batch_X = (batch_X - b_mean) / (b_std + 1e-5)
+
                 optimizer.zero_grad()
-                outputs = model(batch_X)
-                loss = criterion(outputs, batch_y)
-                loss.backward()
+                
+                with torch.amp.autocast('cuda', enabled=use_gpu):
+                    outputs = model(batch_X)
+                    loss = criterion(outputs, batch_y)
+                    
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
                 
                 train_loop.set_postfix(loss=loss.item())
                 
@@ -69,8 +83,18 @@ def optimize_unet_hyperparameters(model_name, in_channels, encoder_name, train_l
                 for batch_X, batch_y in val_loop:
                     if use_gpu and torch.cuda.is_available():
                         batch_X, batch_y = batch_X.cuda(), batch_y.long().cuda()
+                    
+                    if torch.isnan(batch_X).any() or torch.isinf(batch_X).any():
+                        continue
                         
-                    outputs = model(batch_X)
+                    # DYNAMIC NORMALIZATION
+                    b_mean = batch_X.mean(dim=(2, 3), keepdim=True)
+                    b_std = batch_X.std(dim=(2, 3), keepdim=True)
+                    batch_X = (batch_X - b_mean) / (b_std + 1e-5)
+
+                    with torch.amp.autocast('cuda', enabled=use_gpu):
+                        outputs = model(batch_X)
+                        
                     _, predicted = torch.max(outputs.data, 1)
                     
                     pred_flat = predicted.view(-1)
@@ -99,6 +123,7 @@ def optimize_unet_hyperparameters(model_name, in_channels, encoder_name, train_l
             if trial.should_prune():
                 raise optuna.exceptions.TrialPruned()
                 
+        # Clean up memory after trial
         del model, optimizer
         if use_gpu and torch.cuda.is_available():
             torch.cuda.empty_cache()

@@ -19,19 +19,19 @@ if __name__ == "__main__":
     # ==========================================
     modalities = ["hyperspectral", "multispectral"]
     taxonomy = 3
-    patch_sizes = [64]
+    patch_sizes = [256]
     valid_threshold = 0.05
     save_results_dir = "../results_6"
     
     encoders = ["resnet18", "resnet50"]
     
     use_gpu = True
-    use_optuna = False      # Toggle Optuna
+    use_optuna = False  # Activate Optuna
     
     n_trials = 10
     epochs_per_trial = 15
-    final_epochs = 20
-    batch_size = 32        # 32 - pSize: 64 | 8 - pSize: 256
+    final_epochs = 30
+    batch_size = 32         # 32 - pSize: 32 | 8 - pSize: 256
     debug = False
     
     subsets = {

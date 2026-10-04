@@ -14,7 +14,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from loss import CombinedLoss
+from loss import OriginalCombinedLoss
 
 def pipeline_H2Crop_unet_optuna(
     in_channels,
@@ -63,32 +63,11 @@ def pipeline_H2Crop_unet_optuna(
     device = torch.device("cuda" if use_gpu and torch.cuda.is_available() else "cpu")
     print(f"Compute Device: {device}")
 
-    # DYNAMIC ALPHA WEIGHT CALCULATION    
-    print("\n--- Computing Class Weights for Focal Loss ---")
-    class_counts = torch.zeros(num_classes)
-    
-    # Wrap train_loader with tqdm for a visual progress bar
-    for _, batch_y in tqdm(train_loader, desc="Scanning Train Set for Alpha Weights"):
-        class_counts += torch.bincount(batch_y.view(-1), minlength=num_classes)
-        
-    # Calculate inverse frequency (adding a tiny epsilon to prevent division by zero)
-    alpha = 1.0 / (class_counts + 1e-6)
-    
-    # Strictly isolate the background class
-    alpha[0] = 0.0 
-    
-    # Normalize the crop weights so they sum to 1.0 (maintains stable learning rates)
-    crop_alpha_sum = alpha[1:].sum()
-    if crop_alpha_sum > 0:
-        alpha[1:] = alpha[1:] / crop_alpha_sum
-        
-    alpha = alpha.to(device)
-    print(f"    Computed Alpha Tensor: {alpha.cpu().numpy()}")
-
     # OPTUNA HYPERPARAMETER TUNING
     active_trials = 2 if debug else n_trials
     active_epochs = 1 if debug else epochs_per_trial
     
+    # Note: alpha_weights removed from the function call
     best_params = optimize_unet_hyperparameters(
         model_name=model_name,
         in_channels=in_channels,
@@ -96,7 +75,6 @@ def pipeline_H2Crop_unet_optuna(
         train_loader=train_loader,
         val_loader=val_loader,
         num_classes=num_classes,
-        alpha_weights=alpha,       # Pass alpha to Optuna tuner
         n_trials=active_trials,
         epochs_per_trial=active_epochs,
         use_gpu=use_gpu
@@ -117,41 +95,79 @@ def pipeline_H2Crop_unet_optuna(
     
     optimizer = optim.AdamW(model.parameters(), lr=best_params['lr'], weight_decay=best_params['weight_decay'])
     
-    # Instantiate the custom loss with our calculated weights
-    criterion = CombinedLoss(alpha=alpha, ignore_index=0)
+    # Instantiate the original loss (no alpha, evaluates background)
+    criterion = OriginalCombinedLoss()
+    
+    # Initialize the modern AMP Scaler
+    scaler = torch.amp.GradScaler('cuda', enabled=use_gpu and torch.cuda.is_available())
     
     train_epochs = 2 if debug else final_epochs
     history_train_loss = []
     history_test_loss = []
     
     for epoch in range(train_epochs):
+        # ==========================================
+        # 1. TRAINING PHASE
+        # ==========================================
         model.train()
         running_train_loss = 0.0
         
-        for batch_X, batch_y in train_loader:
+        train_loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{train_epochs} [Train]", leave=False)
+        for batch_X, batch_y in train_loop:
             batch_X, batch_y = batch_X.to(device), batch_y.long().to(device)
             
+            # SENSOR GUARD & NORMALIZATION
+            if torch.isnan(batch_X).any() or torch.isinf(batch_X).any():
+                continue
+            b_mean = batch_X.mean(dim=(2, 3), keepdim=True)
+            b_std = batch_X.std(dim=(2, 3), keepdim=True)
+            batch_X = (batch_X - b_mean) / (b_std + 1e-5)
+            
             optimizer.zero_grad()
-            outputs = model(batch_X)
-            loss = criterion(outputs, batch_y)
-            loss.backward()
+            
+            with torch.amp.autocast('cuda', enabled=use_gpu):
+                outputs = model(batch_X)
+                loss = criterion(outputs, batch_y)
+                
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             
             running_train_loss += loss.item()
+            train_loop.set_postfix(loss=f"{loss.item():.4f}")
+            
+            del batch_X, batch_y, outputs, loss
             
         avg_train_loss = running_train_loss / len(train_loader)
         history_train_loss.append(avg_train_loss)
         
+        # ==========================================
+        # 2. VALIDATION PHASE
+        # ==========================================
         model.eval()
         running_test_loss = 0.0
         
+        test_loop = tqdm(test_loader, desc=f"Epoch {epoch+1}/{train_epochs} [Test]", leave=False)
         with torch.no_grad():
-            for batch_X, batch_y in test_loader:
+            for batch_X, batch_y in test_loop:
                 batch_X, batch_y = batch_X.to(device), batch_y.long().to(device)
-                outputs = model(batch_X)
-                loss = criterion(outputs, batch_y)
+                
+                if torch.isnan(batch_X).any() or torch.isinf(batch_X).any():
+                    continue
+                b_mean = batch_X.mean(dim=(2, 3), keepdim=True)
+                b_std = batch_X.std(dim=(2, 3), keepdim=True)
+                batch_X = (batch_X - b_mean) / (b_std + 1e-5)
+                
+                with torch.amp.autocast('cuda', enabled=use_gpu):
+                    outputs = model(batch_X)
+                    loss = criterion(outputs, batch_y)
+                    
                 running_test_loss += loss.item()
+                test_loop.set_postfix(loss=f"{loss.item():.4f}")
+                
+                del batch_X, batch_y, outputs, loss
                 
         avg_test_loss = running_test_loss / len(test_loader)
         history_test_loss.append(avg_test_loss)
@@ -163,7 +179,9 @@ def pipeline_H2Crop_unet_optuna(
         
     print(f"    Saved {train_epochs} epoch checkpoints to: {checkpoint_dir}")
 
-    # PLOT LEARNING CURVE
+    # ==========================================
+    # 3. PLOT LEARNING CURVE
+    # ==========================================
     print("\n--- GENERATING LEARNING CURVE ---")
     fig_lc, ax_lc = plt.subplots(figsize=(10, 6))
     ax_lc.plot(range(1, train_epochs + 1), history_train_loss, label='Train Combined Loss', marker='o')
@@ -180,16 +198,27 @@ def pipeline_H2Crop_unet_optuna(
     plt.close(fig_lc)
     print(f"    Saved Learning Curve to: {learning_curve_path}")
 
-    # TEST EVALUATION
+    # ==========================================
+    # 4. TEST EVALUATION
+    # ==========================================
     print(f"\n--- EVALUATING ON TEST SET ---")
     model.eval()
     global_cm = torch.zeros((num_classes, num_classes), dtype=torch.int64, device=device)
     
+    eval_loop = tqdm(test_loader, desc="Final Evaluation", leave=False)
     with torch.no_grad():
-        for batch_X, batch_y in test_loader:
+        for batch_X, batch_y in eval_loop:
             batch_X, batch_y = batch_X.to(device), batch_y.long().to(device)
             
-            outputs = model(batch_X)
+            if torch.isnan(batch_X).any() or torch.isinf(batch_X).any():
+                continue
+            b_mean = batch_X.mean(dim=(2, 3), keepdim=True)
+            b_std = batch_X.std(dim=(2, 3), keepdim=True)
+            batch_X = (batch_X - b_mean) / (b_std + 1e-5)
+            
+            with torch.amp.autocast('cuda', enabled=use_gpu):
+                outputs = model(batch_X)
+                
             _, predicted = torch.max(outputs.data, 1)
             
             pred_flat = predicted.view(-1)
@@ -198,6 +227,8 @@ def pipeline_H2Crop_unet_optuna(
             indices = num_classes * true_flat + pred_flat
             batch_cm = torch.bincount(indices, minlength=num_classes**2).reshape(num_classes, num_classes)
             global_cm += batch_cm
+            
+            del batch_X, batch_y, outputs, predicted
             
     print("      [Metrics] Calculating performance metrics directly from GPU Confusion Matrix...")
     cm_numpy = global_cm.cpu().numpy()
@@ -242,7 +273,7 @@ def pipeline_H2Crop_unet_optuna(
     plt.savefig(os.path.join(results_out_dir, f"confusion_matrix_subset_{subset_id}_optuna.png"), dpi=300)
     plt.close(fig)
 
-    del model, global_cm, outputs
+    del model, global_cm
     if use_gpu and torch.cuda.is_available():
         torch.cuda.empty_cache()
     gc.collect()
