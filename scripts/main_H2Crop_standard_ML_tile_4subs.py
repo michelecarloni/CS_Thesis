@@ -20,9 +20,11 @@ if __name__ == "__main__":
     # ==========================================
     modalities = ["hyperspectral", "multispectral"]
     taxonomy = 3
-    patch_sizes = [32]
+    patch_sizes = [64]
     save_results_dir = "../results_6"
     use_gpu = True
+
+    valid_threshold = 0.05
     
     use_optuna = True            
     n_trials = 8                # Number of Optuna trials to run per algorithm
@@ -46,7 +48,7 @@ if __name__ == "__main__":
     # ==========================================
     # 1. SUBSET EXTRACTION PHASE
     # ==========================================
-    extract_4_subs_tiles(patch_sizes, subsets, modalities, loader, taxonomy)
+    extract_4_subs_tiles(patch_sizes, subsets, modalities, loader, taxonomy, valid_threshold)
 
     
 
