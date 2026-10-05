@@ -17,10 +17,11 @@ if project_root not in sys.path:
 from models.unet import UNet  
 from H2Crop.data_structures import h2crop_taxonomy_dict
 
+
 # EXTERNAL CONFIGURATION VARIABLES
 patch_size = 64
 dataset_base = "../../ds"
-ml_checkpoints_base = "Absolute_path"
+ml_checkpoints_base = "/media/michele/T7/checkpoints/checkpoints_6_standard_ML_tiles_4_subs_optuna_target_MacroF1score_patch_size_64_train_balanced"
 unet_checkpoints_base = "/media/michele/T7/checkpoints/checkpoints_6_unet_4subs_optuna_focal_dice_patch_size_64_train_balanced"
 img_out_dir = "../../img"
 
@@ -104,8 +105,26 @@ def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3):
         for encoder in unet_encoders:
             checkpoint_path = os.path.join(unet_checkpoints_base, f"unet_enc_{encoder}", mod, f"subset_{subset_id}_pSize_{pSize}", f"epoch_{unet_epoch}.pth")
             if os.path.exists(checkpoint_path):
-                model = UNet(in_channels=in_channels, num_classes=num_classes, encoder_name=encoder, encoder_depth=3).to(device)
-                model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+                # 1. Load the raw dictionary of weights first
+                state_dict = torch.load(checkpoint_path, map_location=device, weights_only=True)
+                
+                # 2. Inspect the dictionary keys to find the maximum decoder block number
+                block_indices = []
+                for key in state_dict.keys():
+                    if "model.decoder.blocks." in key:
+                        try:
+                            idx = int(key.split("model.decoder.blocks.")[1].split(".")[0])
+                            block_indices.append(idx)
+                        except ValueError:
+                            pass
+                
+                # 3. Calculate inferred depth (max index + 1, fallback to 3 if missing)
+                inferred_depth = max(block_indices) + 1 if block_indices else 3
+                print(f"      [Auto-Detect] {encoder} ({mod}) was trained with encoder_depth={inferred_depth}")
+                
+                # 4. Instantiate the model dynamically and load weights
+                model = UNet(in_channels=in_channels, num_classes=num_classes, encoder_name=encoder, encoder_depth=inferred_depth).to(device)
+                model.load_state_dict(state_dict)
                 model.eval()
                 unet_networks[mod][encoder] = model
 
@@ -152,7 +171,7 @@ def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3):
                 H, W = y_true.shape
                 predictions = [y_true]
                 
-                # ML Inference
+                # A) ML Inference
                 X_flat = X_raw.reshape(in_channels, -1).T
                 if mod in scalers:
                     X_flat = scalers[mod].transform(X_flat)
@@ -164,7 +183,7 @@ def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3):
                     else:
                         predictions.append(np.zeros((H, W)))
                         
-                # U-Net Inference
+                # B) U-Net Inference
                 with torch.no_grad():
                     X_tensor = torch.tensor(X_raw, dtype=torch.float32).unsqueeze(0).to(device)
                     for encoder in unet_encoders:
@@ -176,7 +195,7 @@ def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3):
                         else:
                             predictions.append(np.zeros((H, W)))
 
-                # Plot Row
+                # C) Plot Row
                 for col_idx, (pred_raw_grid, title) in enumerate(zip(predictions, titles)):
                     ax = axes[current_row, col_idx]
                     pred_plot_grid = map_to_plot(pred_raw_grid)
@@ -197,7 +216,7 @@ def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3):
                 
                 current_row += 1
                 
-        # Add Legend & Finalize
+        # D) Add Legend & Finalize
         plt.tight_layout(rect=[0, 0.08, 1, 1])
         fig.legend(handles=legend_patches, loc='lower center', ncol=len(unique_classes), 
                    bbox_to_anchor=(0.5, 0.02), fontsize=14, frameon=False)
