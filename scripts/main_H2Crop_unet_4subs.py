@@ -19,7 +19,7 @@ if __name__ == "__main__":
     # ==========================================
     modalities = ["hyperspectral", "multispectral"]
     taxonomy = 3
-    patch_sizes = [256]
+    patch_sizes = [64]
     valid_threshold = 0.05
     save_results_dir = "../results_6"
     
@@ -32,6 +32,7 @@ if __name__ == "__main__":
     epochs_per_trial = 15
     final_epochs = 30
     batch_size = 32         # 32 - pSize: 32 | 8 - pSize: 256
+    encoder_depth = 5       # Only use with ordinary pipeline (without optuna)
     debug = False
     
     subsets = {
@@ -107,7 +108,7 @@ if __name__ == "__main__":
                                 use_gpu=use_gpu,
                                 epochs=final_epochs,
                                 batch_size=batch_size,
-                                encoder_depth=3,      # Fixed architecture depth
+                                encoder_depth=encoder_depth,      # Fixed architecture depth
                                 lr=1e-3,              # Fixed learning rate
                                 weight_decay=1e-4,    # Fixed weight decay
                                 debug=debug
