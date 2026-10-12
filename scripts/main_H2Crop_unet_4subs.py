@@ -30,8 +30,8 @@ if __name__ == "__main__":
     
     n_trials = 10
     epochs_per_trial = 15
-    final_epochs = 30
-    batch_size = 32         # 32 - pSize: 32 | 8 - pSize: 256
+    final_epochs = 20
+    batch_size = 64         # 32 - pSize: 32 | 8 - pSize: 256
     encoder_depth = 5       # Only use with ordinary pipeline (without optuna)
     debug = False
     

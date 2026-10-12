@@ -77,12 +77,9 @@ def pipeline_H2Crop_unet(
     # Instantiate the original loss (no alpha weights, evaluates background)
     criterion = OriginalCombinedLoss()
     
-    # Initialize the modern AMP Scaler
-    scaler = torch.amp.GradScaler('cuda', enabled=use_gpu and torch.cuda.is_available())
-    
     train_epochs = 2 if debug else epochs
     history_train_loss = []
-    history_test_loss = []
+    history_val_loss = []
     
     for epoch in range(train_epochs):
 
@@ -98,23 +95,21 @@ def pipeline_H2Crop_unet(
             if torch.isnan(batch_X).any() or torch.isinf(batch_X).any():
                 continue
                 
-            # DYNAMIC NORMALIZATION: Prevent FP16 overflow by scaling raw reflectance to N(0,1)
+            # DYNAMIC NORMALIZATION: Scale raw reflectance to N(0,1)
             b_mean = batch_X.mean(dim=(2, 3), keepdim=True)
             b_std = batch_X.std(dim=(2, 3), keepdim=True)
             batch_X = (batch_X - b_mean) / (b_std + 1e-5)
             
             optimizer.zero_grad()
             
-            # Cast the forward pass to FP16
-            with torch.amp.autocast('cuda', enabled=use_gpu):
-                outputs = model(batch_X)
-                loss = criterion(outputs, batch_y)
+            # Standard FP-32 Forward Pass
+            outputs = model(batch_X)
+            loss = criterion(outputs, batch_y)
                 
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
+            # Standard FP-32 Backward Pass & Optimization
+            loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            scaler.step(optimizer)
-            scaler.update()
+            optimizer.step()
             
             running_train_loss += loss.item()
             train_loop.set_postfix(loss=f"{loss.item():.4f}")
@@ -127,11 +122,11 @@ def pipeline_H2Crop_unet(
 
         # 2. VALIDATION PHASE
         model.eval()
-        running_test_loss = 0.0
+        running_val_loss = 0.0
         
-        test_loop = tqdm(test_loader, desc=f"Epoch {epoch+1}/{train_epochs} [Test]", leave=False)
+        val_loop = tqdm(val_loader, desc=f"Epoch {epoch+1}/{train_epochs} [Validation]", leave=False)
         with torch.no_grad():
-            for batch_X, batch_y in test_loop:
+            for batch_X, batch_y in val_loop:
                 batch_X, batch_y = batch_X.to(device), batch_y.long().to(device)
                 
                 # SENSOR GUARD & NORMALIZATION
@@ -141,19 +136,19 @@ def pipeline_H2Crop_unet(
                 b_std = batch_X.std(dim=(2, 3), keepdim=True)
                 batch_X = (batch_X - b_mean) / (b_std + 1e-5)
                 
-                with torch.amp.autocast('cuda', enabled=use_gpu):
-                    outputs = model(batch_X)
-                    loss = criterion(outputs, batch_y)
+                # Standard FP-32 Forward Pass
+                outputs = model(batch_X)
+                loss = criterion(outputs, batch_y)
                     
-                running_test_loss += loss.item()
-                test_loop.set_postfix(loss=f"{loss.item():.4f}")
+                running_val_loss += loss.item()
+                val_loop.set_postfix(loss=f"{loss.item():.4f}")
                 
                 del batch_X, batch_y, outputs, loss
                 
-        avg_test_loss = running_test_loss / len(test_loader)
-        history_test_loss.append(avg_test_loss)
+        avg_val_loss = running_val_loss / len(val_loader)
+        history_val_loss.append(avg_val_loss)
             
-        print(f"    Epoch {epoch+1}/{train_epochs} | Train Loss: {avg_train_loss:.4f} | Test Loss: {avg_test_loss:.4f}")
+        print(f"    Epoch {epoch+1}/{train_epochs} | Train Loss: {avg_train_loss:.4f} | Validation Loss: {avg_val_loss:.4f}")
         
         epoch_filepath = os.path.join(checkpoint_dir, f"epoch_{epoch+1:02d}.pth")
         torch.save(model.state_dict(), epoch_filepath)
@@ -165,7 +160,7 @@ def pipeline_H2Crop_unet(
     print("\n--- GENERATING LEARNING CURVE ---")
     fig_lc, ax_lc = plt.subplots(figsize=(10, 6))
     ax_lc.plot(range(1, train_epochs + 1), history_train_loss, label='Train Combined Loss', marker='o')
-    ax_lc.plot(range(1, train_epochs + 1), history_test_loss, label='Test Combined Loss', marker='s')
+    ax_lc.plot(range(1, train_epochs + 1), history_val_loss, label='Validation Combined Loss', marker='s')
     ax_lc.set_xlabel('Epoch')
     ax_lc.set_ylabel('Original Focal+Dice Loss (Lower is Better)')
     ax_lc.set_title(f'Learning Curve: {model_name.upper()}\n({modality} | Subset {subset_id} | pSize {patch_size})')
@@ -196,8 +191,8 @@ def pipeline_H2Crop_unet(
             b_std = batch_X.std(dim=(2, 3), keepdim=True)
             batch_X = (batch_X - b_mean) / (b_std + 1e-5)
             
-            with torch.amp.autocast('cuda', enabled=use_gpu):
-                outputs = model(batch_X)
+            # Standard FP-32 Forward Pass
+            outputs = model(batch_X)
                 
             _, predicted = torch.max(outputs.data, 1)
             
