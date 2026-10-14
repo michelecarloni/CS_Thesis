@@ -62,7 +62,7 @@ def extract_dofa_embeddings(data_loader, model, device, wave_list_um, desc="Extr
 
 def analyze_subset_domain_shift(subset_id, subset_classes, dofa_model, wave_list_um, device, umap_base_dir, batch_size=8):
     # Set the dataset directory targeting patch size 64
-    dataset_dir = f"../ds/H2Crop_tiles_ds_subset_{subset_id}/hyperspectral_taxonomy_3_pSize_64"
+    dataset_dir = os.path.join(project_root, f"ds/H2Crop_tiles_ds_subset_{subset_id}/hyperspectral_taxonomy_3_pSize_64")
     
     print(f"\n{'='*60}")
     print(f"PROCESSING SUBSET {subset_id} | Classes: {subset_classes}")
@@ -79,7 +79,7 @@ def analyze_subset_domain_shift(subset_id, subset_classes, dofa_model, wave_list
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
 
-    # Process Test embeddings first
+    # REVERSED ORDER: Process Test embeddings first
     print("--- Extracting Test Embeddings ---")
     test_embeddings = extract_dofa_embeddings(test_loader, dofa_model, device, wave_list_um, f"Test S{subset_id}")
 
@@ -104,13 +104,13 @@ def analyze_subset_domain_shift(subset_id, subset_classes, dofa_model, wave_list
     # Plot Test first (drawn underneath)
     ax.scatter(test_2d[:, 0], test_2d[:, 1], alpha=0.3, s=20, label='Test Set Embeddings', c='#ff7f0e', marker='X')
     # Plot Train second (drawn on top)
-    ax.scatter(train_2d[:, 0], train_2d[:, 1], alpha=0.3, s=15, label='Train Set Embeddings', c='#1f77b4', edgecolors='none')
+    ax.scatter(train_2d[:, 0], train_2d[:, 1], alpha=0.8, s=15, label='Train Set Embeddings', c='#1f77b4', edgecolors='none')
     
     ax.set_title(f'DOFA Latent Space UMAP: Train vs Test Distribution (Subset {subset_id})', fontsize=16, fontweight='bold')
     ax.set_xlabel('UMAP Dimension 1', fontsize=12)
     ax.set_ylabel('UMAP Dimension 2', fontsize=12)
     ax.legend(loc='best', fontsize=12, markerscale=2)
-    ax.grid(True, linestyle='--', alpha=0.3)
+    ax.grid(True, linestyle='--', alpha=0.5)
     
     plt.tight_layout()
     # Save to the root-level shared directory
@@ -123,19 +123,19 @@ def analyze_subset_domain_shift(subset_id, subset_classes, dofa_model, wave_list
 if __name__ == "__main__":
     # Define the 4 target subsets
     subsets = {
-        1: [8, 11, 23, 56],
+        # 1: [8, 11, 23, 56],
         2: [13, 30, 38, 53, 61],
-        3: [1, 2, 10, 17],
-        4: [29, 50, 64, 76]
+        # 3: [1, 2, 10, 17],
+        # 4: [29, 50, 64, 76]
     }
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"--- Global Execution Device: {device} ---")
     
-    # Create the central UMAP image directory at the script execution root
-    umap_base_dir = "umap_img"
+    # Create the central UMAP image directory cleanly mapped to your project root
+    umap_base_dir = os.path.join(project_root, "umap_img")
     os.makedirs(umap_base_dir, exist_ok=True)
-    print(f"--- Saving outputs to central directory: {os.path.abspath(umap_base_dir)} ---")
+    print(f"--- Saving outputs to central directory: {umap_base_dir} ---")
 
     # Load model once to save VRAM
     print("\n--- Loading DOFA Foundation Model (Global) ---")
