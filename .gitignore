@@ -6,3 +6,5 @@ results*
 img/
 unify_images.py
 latex/
+umap_img/
+count_tiles.py

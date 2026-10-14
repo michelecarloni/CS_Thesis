@@ -74,12 +74,16 @@ def pipeline_H2Crop_unet(
     
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     
-    # Instantiate the original loss (no alpha weights, evaluates background)
+    # Instantiate the original loss
     criterion = OriginalCombinedLoss()
     
     train_epochs = 2 if debug else epochs
     history_train_loss = []
     history_val_loss = []
+    
+    # Checkpointing Trackers
+    best_val_macro_f1_crops = -1.0
+    best_model_path = os.path.join(checkpoint_dir, "best_model.pth")
     
     for epoch in range(train_epochs):
 
@@ -91,11 +95,11 @@ def pipeline_H2Crop_unet(
         for batch_X, batch_y in train_loop:
             batch_X, batch_y = batch_X.to(device), batch_y.long().to(device)
             
-            # SENSOR GUARD: Skip corrupted EnMAP data
+            # SENSOR GUARD
             if torch.isnan(batch_X).any() or torch.isinf(batch_X).any():
                 continue
                 
-            # DYNAMIC NORMALIZATION: Scale raw reflectance to N(0,1)
+            # DYNAMIC NORMALIZATION
             b_mean = batch_X.mean(dim=(2, 3), keepdim=True)
             b_std = batch_X.std(dim=(2, 3), keepdim=True)
             batch_X = (batch_X - b_mean) / (b_std + 1e-5)
@@ -106,7 +110,7 @@ def pipeline_H2Crop_unet(
             outputs = model(batch_X)
             loss = criterion(outputs, batch_y)
                 
-            # Standard FP-32 Backward Pass & Optimization
+            # Standard FP-32 Backward Pass
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
@@ -120,9 +124,10 @@ def pipeline_H2Crop_unet(
         history_train_loss.append(avg_train_loss)
         
 
-        # 2. VALIDATION PHASE
+        # 2. VALIDATION PHASE (WITH GPU CONFUSION MATRIX FOR F1)
         model.eval()
         running_val_loss = 0.0
+        val_global_cm = torch.zeros((num_classes, num_classes), dtype=torch.int64, device=device)
         
         val_loop = tqdm(val_loader, desc=f"Epoch {epoch+1}/{train_epochs} [Validation]", leave=False)
         with torch.no_grad():
@@ -136,20 +141,52 @@ def pipeline_H2Crop_unet(
                 b_std = batch_X.std(dim=(2, 3), keepdim=True)
                 batch_X = (batch_X - b_mean) / (b_std + 1e-5)
                 
-                # Standard FP-32 Forward Pass
+                # Forward Pass
                 outputs = model(batch_X)
                 loss = criterion(outputs, batch_y)
-                    
                 running_val_loss += loss.item()
-                val_loop.set_postfix(loss=f"{loss.item():.4f}")
                 
-                del batch_X, batch_y, outputs, loss
+                # Calculate predictions for CM
+                _, predicted = torch.max(outputs.data, 1)
+                pred_flat = predicted.view(-1)
+                true_flat = batch_y.view(-1)
+                
+                indices = num_classes * true_flat + pred_flat
+                batch_cm = torch.bincount(indices, minlength=num_classes**2).reshape(num_classes, num_classes)
+                val_global_cm += batch_cm
+                
+                val_loop.set_postfix(loss=f"{loss.item():.4f}")
+                del batch_X, batch_y, outputs, loss, predicted
                 
         avg_val_loss = running_val_loss / len(val_loader)
         history_val_loss.append(avg_val_loss)
-            
-        print(f"    Epoch {epoch+1}/{train_epochs} | Train Loss: {avg_train_loss:.4f} | Validation Loss: {avg_val_loss:.4f}")
         
+        # Calculate Validation F1 specifically for crops (ignoring Background class 0)
+        val_cm_numpy = val_global_cm.cpu().numpy()
+        val_macro_f1_crops = 0.0
+        
+        # Start from index 1 to ignore Background (0)
+        for idx in range(1, num_classes):
+            tp = val_cm_numpy[idx, idx]
+            fp = val_cm_numpy[:, idx].sum() - tp
+            fn = val_cm_numpy[idx, :].sum() - tp
+            
+            p = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            r = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            f1 = 2 * p * r / (p + r) if (p + r) > 0 else 0.0
+            val_macro_f1_crops += f1
+            
+        val_macro_f1_crops /= (num_classes - 1)  # Average only over crop classes
+            
+        print(f"    Epoch {epoch+1}/{train_epochs} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f} | Val Crop mF1: {val_macro_f1_crops:.4f}")
+        
+        # CHECKPOINTING: Save best model based on Crop F1-Score
+        if val_macro_f1_crops > best_val_macro_f1_crops:
+            best_val_macro_f1_crops = val_macro_f1_crops
+            print(f"      [*] Crop F1-Score improved! Saving best model.")
+            torch.save(model.state_dict(), best_model_path)
+        
+        # Save every epoch unconditionally for your records
         epoch_filepath = os.path.join(checkpoint_dir, f"epoch_{epoch+1:02d}.pth")
         torch.save(model.state_dict(), epoch_filepath)
         
@@ -176,7 +213,12 @@ def pipeline_H2Crop_unet(
 
     # 4. TEST EVALUATION
     print(f"\n--- EVALUATING ON TEST SET ---")
+    
+    # EXPLICITLY LOAD BEST WEIGHTS BEFORE TESTING
+    print(f"      [*] Loading best model weights (Val Crop mF1: {best_val_macro_f1_crops:.4f}) for final test...")
+    model.load_state_dict(torch.load(best_model_path))
     model.eval()
+    
     global_cm = torch.zeros((num_classes, num_classes), dtype=torch.int64, device=device)
     
     eval_loop = tqdm(test_loader, desc="Final Evaluation", leave=False)
@@ -191,11 +233,9 @@ def pipeline_H2Crop_unet(
             b_std = batch_X.std(dim=(2, 3), keepdim=True)
             batch_X = (batch_X - b_mean) / (b_std + 1e-5)
             
-            # Standard FP-32 Forward Pass
             outputs = model(batch_X)
                 
             _, predicted = torch.max(outputs.data, 1)
-            
             pred_flat = predicted.view(-1)
             true_flat = batch_y.view(-1)
             
