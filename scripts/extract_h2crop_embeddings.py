@@ -123,10 +123,10 @@ def analyze_subset_domain_shift(subset_id, subset_classes, dofa_model, wave_list
 if __name__ == "__main__":
     # Define the 4 target subsets
     subsets = {
-        # 1: [8, 11, 23, 56],
+        1: [8, 11, 23, 56],
         2: [13, 30, 38, 53, 61],
-        # 3: [1, 2, 10, 17],
-        # 4: [29, 50, 64, 76]
+        3: [1, 2, 10, 17],
+        4: [29, 50, 64, 76]
     }
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
