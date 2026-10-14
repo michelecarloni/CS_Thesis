@@ -468,14 +468,13 @@ class H2Crop:
 
     def _split_balanced_segmentation_tiles(self, tile_stats, base_dir, subset_classes, temp_dir):
         """
-        Frequency-aware splitting algorithm based on GLOBAL dataset rarity.
-        Ensures globally rare crops are properly stratified across 60/20/20 splits.
+        Performs a simple random 70/20/10 split of the extracted tiles.
         """
         import random
         import shutil
         import os
         
-        print("\n--- Frequency-Aware Split (60/20/20) ---")
+        print("\n--- Simple Random Split (70/20/10) ---")
         train_dir = os.path.join(base_dir, "train")
         val_dir = os.path.join(base_dir, "validation")
         test_dir = os.path.join(base_dir, "test")
@@ -483,86 +482,56 @@ class H2Crop:
         for d in [train_dir, val_dir, test_dir]:
             os.makedirs(d, exist_ok=True)
 
-        # STEP 1: Determine Global Rarity
-        print("1. Calculating Global Rarity Hierarchy...")
-        global_counts = {c: 0 for c in subset_classes}
-        for stat in tile_stats:
-            hist = stat['hist']
-            for c in subset_classes:
-                global_counts[c] += hist.get(c, 0)
-                
-        # Sort subset classes from the absolute rarest to the most abundant
-        global_hierarchy = sorted(subset_classes, key=lambda c: global_counts[c])
-        print(f"   Hierarchy (Rarest -> Most Abundant): {global_hierarchy}")
-
-        # STEP 2 & 3: Assign Signatures & Group
-        print("2 & 3. Assigning Signatures and Grouping...")
-        signature_groups = {c: [] for c in subset_classes}
+        # 1. Shuffle the tiles randomly
+        random.seed(42)  # Lock the seed so the splits are reproducible across runs
+        random.shuffle(tile_stats)
         
-        for stat in tile_stats:
-            hist = stat['hist']
-            # Find which target crops are actually physically present in this tile
-            present_crops = [c for c in subset_classes if hist.get(c, 0) > 0]
-            
-            if not present_crops:
-                continue
-                
-            # The signature is the crop that appears EARLIEST in our globally rare list
-            signature_crop = min(present_crops, key=lambda c: global_hierarchy.index(c))
-            signature_groups[signature_crop].append(stat)
+        n_total = len(tile_stats)
+        if n_total == 0:
+            print("No valid tiles found to split!")
+            return
 
-        # STEP 4: Stratified Splitting
-        print("4. Stratified Splitting (60/20/20)...")
-        random.seed(42)
-        tiles_train, tiles_val, tiles_test = 0, 0, 0
+        # 2. Calculate indices for a 70/20/10 split
+        train_end = int(n_total * 0.70)
+        val_end = int(n_total * 0.90)  # 70% + 20%
         
-        # Iterate through the groups starting from the rarest pile
-        for crop in global_hierarchy:
-            tiles = signature_groups[crop]
-            random.shuffle(tiles)
-            n = len(tiles)
-            
-            train_end = int(n * 0.60)
-            val_end = int(n * 0.80)
-            
-            train_split = tiles[:train_end]
-            val_split = tiles[train_end:val_end]
-            test_split = tiles[val_end:]
-            
-            for stat in train_split:
-                filename = os.path.basename(stat['path'])
-                shutil.move(stat['path'], os.path.join(train_dir, filename))
-                tiles_train += 1
-                
-            for stat in val_split:
-                filename = os.path.basename(stat['path'])
-                shutil.move(stat['path'], os.path.join(val_dir, filename))
-                tiles_val += 1
-                
-            for stat in test_split:
-                filename = os.path.basename(stat['path'])
-                shutil.move(stat['path'], os.path.join(test_dir, filename))
-                tiles_test += 1
+        train_split = tile_stats[:train_end]
+        val_split = tile_stats[train_end:val_end]
+        test_split = tile_stats[val_end:]
+        
+        print(f"Total Valid Tiles: {n_total}")
+        print(f" -> Train: {len(train_split)} tiles (70%)")
+        print(f" -> Validation: {len(val_split)} tiles (20%)")
+        print(f" -> Test: {len(test_split)} tiles (10%)")
 
+        # 3. Move the files from the temporary folder to their respective split directories
+        for stat in train_split:
+            filename = os.path.basename(stat['path'])
+            shutil.move(stat['path'], os.path.join(train_dir, filename))
+            
+        for stat in val_split:
+            filename = os.path.basename(stat['path'])
+            shutil.move(stat['path'], os.path.join(val_dir, filename))
+            
+        for stat in test_split:
+            filename = os.path.basename(stat['path'])
+            shutil.move(stat['path'], os.path.join(test_dir, filename))
+
+        # Cleanup temp directory
         if not os.listdir(temp_dir):
             os.rmdir(temp_dir)
 
-        # Write Summary
+        # 4. Write Summary Log
         summary_path = os.path.join(base_dir, "split_summary.txt")
         with open(summary_path, "w") as f:
-            f.write("--- Frequency-Aware Segmentation Extraction Summary ---\n")
+            f.write("--- Simple Random 70/20/10 Extraction Summary ---\n")
             f.write(f"Subset Classes: {subset_classes}\n")
-            f.write(f"Global Hierarchy (Rarest -> Abundant): {global_hierarchy}\n")
-            f.write(f"Total Tiles Extracted: {len(tile_stats)}\n\n")
-
+            f.write(f"Total Tiles Extracted: {n_total}\n\n")
+            
             f.write("--- Tile Distribution ---\n")
-            f.write(f"Train Tiles: {tiles_train}\n")
-            f.write(f"Validation Tiles: {tiles_val}\n")
-            f.write(f"Test Tiles: {tiles_test}\n\n")
-
-            f.write("--- Signature Group Sizes ---\n")
-            for c in global_hierarchy:
-                f.write(f"Class {c:2d} Signature Tiles: {len(signature_groups[c])}\n")
+            f.write(f"Train Tiles: {len(train_split)}\n")
+            f.write(f"Validation Tiles: {len(val_split)}\n")
+            f.write(f"Test Tiles: {len(test_split)}\n")
 
         print(f"\nExtraction and splitting complete. Summary saved to: {summary_path}")
 
