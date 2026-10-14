@@ -100,11 +100,11 @@ def analyze_subset_domain_shift(subset_id, subset_classes, dofa_model, wave_list
 
     print("--- Generating Latent Space Scatter Plot ---")
     fig, ax = plt.subplots(figsize=(12, 8))
-    
-    # Plot Test first (drawn underneath)
-    ax.scatter(test_2d[:, 0], test_2d[:, 1], alpha=0.3, s=20, label='Test Set Embeddings', c='#ff7f0e', marker='X')
+
     # Plot Train second (drawn on top)
-    ax.scatter(train_2d[:, 0], train_2d[:, 1], alpha=0.8, s=15, label='Train Set Embeddings', c='#1f77b4', edgecolors='none')
+    ax.scatter(train_2d[:, 0], train_2d[:, 1], alpha=0.3, s=15, label='Train Set Embeddings', c='#1f77b4', edgecolors='none')
+    # Plot Test first (drawn underneath)
+    ax.scatter(test_2d[:, 0], test_2d[:, 1], alpha=0.8, s=20, label='Test Set Embeddings', c='#ff7f0e', marker='X')
     
     ax.set_title(f'DOFA Latent Space UMAP: Train vs Test Distribution (Subset {subset_id})', fontsize=16, fontweight='bold')
     ax.set_xlabel('UMAP Dimension 1', fontsize=12)
