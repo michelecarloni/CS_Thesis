@@ -32,7 +32,7 @@ if __name__ == "__main__":
     epochs_per_trial = 15
     final_epochs = 20
     batch_size = 64         # 32 - pSize: 32 | 8 - pSize: 256
-    encoder_depth = 5       # Only use with ordinary pipeline (without optuna)
+    encoder_depth = 4       # Only use with ordinary pipeline (without optuna)
     debug = False
     
     subsets = {
@@ -49,8 +49,6 @@ if __name__ == "__main__":
     # 1. SUBSET EXTRACTION PHASE
     # ==========================================
     extract_4_subs_tiles(patch_sizes, subsets, modalities, loader, taxonomy, valid_threshold)
-
-    sys.exit()
 
     # ==========================================
     # 2. TRAINING PHASE (Deep Learning U-Net)
