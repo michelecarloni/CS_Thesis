@@ -26,13 +26,13 @@ if __name__ == "__main__":
 
     valid_threshold = 0.05
     
-    use_optuna = True            
+    use_optuna = False            
     n_trials = 8                # Number of Optuna trials to run per algorithm
     debug = False                # Toggle to True for a rapid plumbing test (processes only 10 files)
 
-    train_samples_per_class=100000,
-    val_samples_per_class=25000,
-    test_samples_per_class=100,
+    train_samples_per_class=100000
+    val_samples_per_class=25000
+    test_samples_per_class=100
     
     subsets = {
         1: [8, 11, 23, 56],
@@ -90,9 +90,7 @@ if __name__ == "__main__":
                             modality=mod,
                             taxonomy=taxonomy,
                             patch_size=patch_size,
-                            use_gpu=use_gpu,
                             train_samples_per_class=train_samples_per_class,
-                            test_samples_per_class=test_samples_per_class,
                             debug=debug
                         )
                 else:
