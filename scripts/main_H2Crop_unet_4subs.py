@@ -9,8 +9,7 @@ if project_root not in sys.path:
 from H2Crop.H2Crop import H2Crop
 from scripts.extract_tiles_4_subs import extract_4_subs_tiles
 
-# Import both pipelines
-from pipelines.pipeline_H2Crop_unet_optuna import pipeline_H2Crop_unet_optuna
+# Import pipeline
 from pipelines.pipeline_H2Crop_unet import pipeline_H2Crop_unet
 
 if __name__ == "__main__":
@@ -20,19 +19,20 @@ if __name__ == "__main__":
     modalities = ["hyperspectral", "multispectral"]
     taxonomy = 3
     patch_sizes = [64]
-    valid_threshold = 0.05
-    save_results_dir = "../results_6"
+    valid_threshold = 0.10  # Increased to ensure good crop density per tile
+    save_results_dir = "../results_7"
     
-    encoders = ["resnet18", "resnet50"]
+    # Exclusively use ResNet-18 encoder
+    encoders = ["resnet18"]
     
     use_gpu = True
-    use_optuna = False  # Activate Optuna
+    use_optuna = False
     
     n_trials = 10
     epochs_per_trial = 15
-    final_epochs = 20
-    batch_size = 64         # 32 - pSize: 32 | 8 - pSize: 256
-    encoder_depth = 4       # Only use with ordinary pipeline (without optuna)
+    final_epochs = 40       # Increased to 40 for CosineAnnealingLR convergence
+    batch_size = 32         # Optimized batch size for 64x64 tiles
+    encoder_depth = 4       # Matched with 64x64 tiles and ResNet-18
     debug = False
     
     subsets = {
@@ -73,45 +73,25 @@ if __name__ == "__main__":
                         
                         print(f"\nInitializing {model_name} for {mod.upper()} Subset {subset_id}...")
                         
-                        if use_optuna:
-                            pipeline_H2Crop_unet_optuna(
-                                in_channels=in_channels,
-                                encoder_name=encoder,
-                                model_name=model_name,
-                                save_results_dir=current_results_dir,
-                                dataset_dir=dataset_dir,
-                                subset_id=subset_id,
-                                subset_classes=subset_classes,
-                                modality=mod,
-                                taxonomy=taxonomy,
-                                patch_size=patch_size,
-                                use_gpu=use_gpu,
-                                n_trials=n_trials,
-                                epochs_per_trial=epochs_per_trial,
-                                final_epochs=final_epochs,
-                                batch_size=batch_size,
-                                debug=debug
-                            )
-                        else:
-                            # Standard Training (No Optuna)
-                            pipeline_H2Crop_unet(
-                                in_channels=in_channels,
-                                encoder_name=encoder,
-                                model_name=model_name,
-                                save_results_dir=current_results_dir,
-                                dataset_dir=dataset_dir,
-                                subset_id=subset_id,
-                                subset_classes=subset_classes,
-                                modality=mod,
-                                taxonomy=taxonomy,
-                                patch_size=patch_size,
-                                use_gpu=use_gpu,
-                                epochs=final_epochs,
-                                batch_size=batch_size,
-                                encoder_depth=encoder_depth,      # Fixed architecture depth
-                                lr=1e-3,              # Fixed learning rate
-                                weight_decay=1e-4,    # Fixed weight decay
-                                debug=debug
-                            )
+                        # Standard Training (No Optuna)
+                        pipeline_H2Crop_unet(
+                            in_channels=in_channels,
+                            encoder_name=encoder,
+                            model_name=model_name,
+                            save_results_dir=current_results_dir,
+                            dataset_dir=dataset_dir,
+                            subset_id=subset_id,
+                            subset_classes=subset_classes,
+                            modality=mod,
+                            taxonomy=taxonomy,
+                            patch_size=patch_size,
+                            use_gpu=use_gpu,
+                            epochs=final_epochs,
+                            batch_size=batch_size,
+                            encoder_depth=encoder_depth,
+                            lr=1e-3,
+                            weight_decay=1e-4,
+                            debug=debug
+                        )
                     else:
                         print(f"[Error] Dataset directory {dataset_dir} missing. Skipping training for this config.")
