@@ -14,6 +14,7 @@ from tqdm import tqdm
 
 from loss import OriginalCombinedLoss
 
+
 def pipeline_H2Crop_unet(
     in_channels,
     encoder_name,
@@ -24,11 +25,11 @@ def pipeline_H2Crop_unet(
     subset_classes,
     modality, 
     taxonomy=3, 
-    patch_size=256, 
+    patch_size=64, 
     use_gpu=True, 
     epochs=30,
-    batch_size=8,
-    encoder_depth=3,
+    batch_size=32,
+    encoder_depth=4,
     lr=1e-3,
     weight_decay=1e-4,
     debug=False
@@ -49,9 +50,10 @@ def pipeline_H2Crop_unet(
     val_dataset = H2CropTileDataset(os.path.join(dataset_dir, "validation"), subset_classes=subset_classes, debug=debug)
     test_dataset = H2CropTileDataset(os.path.join(dataset_dir, "test"), subset_classes=subset_classes, debug=debug)
     
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=use_gpu)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=use_gpu)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=use_gpu)
+    num_workers = 0 if debug else min(4, os.cpu_count() or 1)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=use_gpu)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=use_gpu)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=use_gpu)
 
     num_classes = len(subset_classes) + 1
     sample_y = [0] + sorted(subset_classes)
@@ -74,10 +76,12 @@ def pipeline_H2Crop_unet(
     
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     
-    # Instantiate the original loss
-    criterion = OriginalCombinedLoss()
-    
     train_epochs = 2 if debug else epochs
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=train_epochs, eta_min=1e-5)
+    
+    # Instantiate the updated Weighted CE + Foreground Dice loss
+    criterion = OriginalCombinedLoss(num_classes=num_classes, bg_weight=0.15).to(device)
+    
     history_train_loss = []
     history_val_loss = []
     
@@ -90,61 +94,62 @@ def pipeline_H2Crop_unet(
         # 1. TRAINING PHASE
         model.train()
         running_train_loss = 0.0
+        valid_train_batches = 0
         
         train_loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{train_epochs} [Train]", leave=False)
         for batch_X, batch_y in train_loop:
-            batch_X, batch_y = batch_X.to(device), batch_y.long().to(device)
+            batch_X = batch_X.to(device, non_blocking=True)
+            batch_y = batch_y.long().to(device, non_blocking=True)
             
-            # SENSOR GUARD
-            if torch.isnan(batch_X).any() or torch.isinf(batch_X).any():
-                continue
-                
-            # DYNAMIC NORMALIZATION
-            b_mean = batch_X.mean(dim=(2, 3), keepdim=True)
-            b_std = batch_X.std(dim=(2, 3), keepdim=True)
-            batch_X = (batch_X - b_mean) / (b_std + 1e-5)
+            # Sanitize any isolated NaN/Inf values without dropping the batch
+            batch_X = torch.nan_to_num(batch_X, nan=0.0, posinf=0.0, neginf=0.0)
             
             optimizer.zero_grad()
             
-            # Standard FP-32 Forward Pass
+            # Forward Pass (Global per-band normalization happens inside UNet.input_norm)
             outputs = model(batch_X)
             loss = criterion(outputs, batch_y)
+            
+            if torch.isnan(loss) or torch.isinf(loss):
+                continue
                 
-            # Standard FP-32 Backward Pass
+            # Backward Pass
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             
             running_train_loss += loss.item()
+            valid_train_batches += 1
             train_loop.set_postfix(loss=f"{loss.item():.4f}")
             
             del batch_X, batch_y, outputs, loss
             
-        avg_train_loss = running_train_loss / len(train_loader)
+        scheduler.step()
+        avg_train_loss = running_train_loss / max(valid_train_batches, 1)
         history_train_loss.append(avg_train_loss)
         
 
         # 2. VALIDATION PHASE (WITH GPU CONFUSION MATRIX FOR F1)
         model.eval()
         running_val_loss = 0.0
+        valid_val_batches = 0
         val_global_cm = torch.zeros((num_classes, num_classes), dtype=torch.int64, device=device)
         
         val_loop = tqdm(val_loader, desc=f"Epoch {epoch+1}/{train_epochs} [Validation]", leave=False)
         with torch.no_grad():
             for batch_X, batch_y in val_loop:
-                batch_X, batch_y = batch_X.to(device), batch_y.long().to(device)
+                batch_X = batch_X.to(device, non_blocking=True)
+                batch_y = batch_y.long().to(device, non_blocking=True)
                 
-                # SENSOR GUARD & NORMALIZATION
-                if torch.isnan(batch_X).any() or torch.isinf(batch_X).any():
-                    continue
-                b_mean = batch_X.mean(dim=(2, 3), keepdim=True)
-                b_std = batch_X.std(dim=(2, 3), keepdim=True)
-                batch_X = (batch_X - b_mean) / (b_std + 1e-5)
+                batch_X = torch.nan_to_num(batch_X, nan=0.0, posinf=0.0, neginf=0.0)
                 
                 # Forward Pass
                 outputs = model(batch_X)
                 loss = criterion(outputs, batch_y)
-                running_val_loss += loss.item()
+                
+                if not (torch.isnan(loss) or torch.isinf(loss)):
+                    running_val_loss += loss.item()
+                    valid_val_batches += 1
                 
                 # Calculate predictions for CM
                 _, predicted = torch.max(outputs.data, 1)
@@ -158,7 +163,7 @@ def pipeline_H2Crop_unet(
                 val_loop.set_postfix(loss=f"{loss.item():.4f}")
                 del batch_X, batch_y, outputs, loss, predicted
                 
-        avg_val_loss = running_val_loss / len(val_loader)
+        avg_val_loss = running_val_loss / max(valid_val_batches, 1)
         history_val_loss.append(avg_val_loss)
         
         # Calculate Validation F1 specifically for crops (ignoring Background class 0)
@@ -177,8 +182,9 @@ def pipeline_H2Crop_unet(
             val_macro_f1_crops += f1
             
         val_macro_f1_crops /= (num_classes - 1)  # Average only over crop classes
+        current_lr = optimizer.param_groups[0]['lr']
             
-        print(f"    Epoch {epoch+1}/{train_epochs} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f} | Val Crop mF1: {val_macro_f1_crops:.4f}")
+        print(f"    Epoch {epoch+1:02d}/{train_epochs} | LR: {current_lr:.2e} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f} | Val Crop mF1: {val_macro_f1_crops:.4f}")
         
         # CHECKPOINTING: Save best model based on Crop F1-Score
         if val_macro_f1_crops > best_val_macro_f1_crops:
@@ -199,7 +205,7 @@ def pipeline_H2Crop_unet(
     ax_lc.plot(range(1, train_epochs + 1), history_train_loss, label='Train Combined Loss', marker='o')
     ax_lc.plot(range(1, train_epochs + 1), history_val_loss, label='Validation Combined Loss', marker='s')
     ax_lc.set_xlabel('Epoch')
-    ax_lc.set_ylabel('Original Focal+Dice Loss (Lower is Better)')
+    ax_lc.set_ylabel('Weighted CE + Foreground Dice Loss (Lower is Better)')
     ax_lc.set_title(f'Learning Curve: {model_name.upper()}\n({modality} | Subset {subset_id} | pSize {patch_size})')
     ax_lc.legend()
     ax_lc.grid(True, linestyle='--', alpha=0.7)
@@ -224,14 +230,10 @@ def pipeline_H2Crop_unet(
     eval_loop = tqdm(test_loader, desc="Final Evaluation", leave=False)
     with torch.no_grad():
         for batch_X, batch_y in eval_loop:
-            batch_X, batch_y = batch_X.to(device), batch_y.long().to(device)
+            batch_X = batch_X.to(device, non_blocking=True)
+            batch_y = batch_y.long().to(device, non_blocking=True)
             
-            # SENSOR GUARD & NORMALIZATION
-            if torch.isnan(batch_X).any() or torch.isinf(batch_X).any():
-                continue
-            b_mean = batch_X.mean(dim=(2, 3), keepdim=True)
-            b_std = batch_X.std(dim=(2, 3), keepdim=True)
-            batch_X = (batch_X - b_mean) / (b_std + 1e-5)
+            batch_X = torch.nan_to_num(batch_X, nan=0.0, posinf=0.0, neginf=0.0)
             
             outputs = model(batch_X)
                 
