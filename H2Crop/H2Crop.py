@@ -396,14 +396,17 @@ class H2Crop:
         self._split_balanced_segmentation_tiles(tile_stats, final_save_dir, subset_classes, temp_dir)
 
 
-    def _process_single_h5_file(self, filename, taxonomy, modality, patch_size, subset_classes, temp_dir, valid_threshold=0.40):
+    def _process_single_h5_file(self, filename, taxonomy, modality, patch_size, subset_classes, temp_dir, valid_threshold=0.05):
         """
-        Processes a single .h5 file. Upsamples HSI to 192x192, symmetrically pads to 256x256, 
-        and extracts tiles. Threshold math now explicitly ignores synthetic padding.
+        Processes a single .h5 file at native 64x64 (30m) resolution:
+        - Hyperspectral: Kept at native (C, 64, 64).
+        - Multispectral: Downscaled from (C, 192, 192) to (C, 64, 64) using 3x3 block averaging.
+        - Label Mask: Downscaled from (192, 192) to (64, 64) using 3x3 majority voting (mode).
+        - No synthetic border padding is applied.
         """
         import h5py
         import numpy as np
-        import scipy.ndimage
+        from scipy.stats import mode
         
         file_path = os.path.join(self.h5_dir, filename)
         sample_id = filename.replace('.h5', '')
@@ -412,32 +415,42 @@ class H2Crop:
         try:
             with h5py.File(file_path, 'r') as h5f:
                 labels_full = np.array(h5f['label'])
-                mask_array = labels_full[taxonomy]
+                mask_192 = labels_full[taxonomy]  # Native shape: (192, 192)
                 
+                # 1. Load Modality and align to (C, 64, 64)
                 if modality.lower() == "hyperspectral":
-                    image_array = np.array(h5f['EnMAP_data'])
-                    # Upsample HSI from 64x64 to 192x192 using bilinear interpolation (order=1)
-                    image_array = scipy.ndimage.zoom(image_array, (1, 3.0, 3.0), order=1)
+                    # Native shape is already (218, 64, 64)
+                    image_array = np.array(h5f['EnMAP_data'], dtype=np.float32)
                 elif modality.lower() == "multispectral":
-                    s2_full = np.array(h5f['S2_data'])
+                    s2_full = np.array(h5f['S2_data'], dtype=np.float32)
                     month_str = filename[4:6]
                     s2_time_index = int(month_str) - 1
-                    image_array = s2_full[s2_time_index]
+                    s2_month = s2_full[s2_time_index]  # Shape: (10, 192, 192)
+                    
+                    # Downscale (C, 192, 192) -> (C, 64, 64) via exact 3x3 block mean
+                    c = s2_month.shape[0]
+                    image_array = s2_month.reshape(c, 64, 3, 64, 3).mean(axis=(2, 4))
+                else:
+                    raise ValueError("Modality must be 'hyperspectral' or 'multispectral'")
                 
-                # 256x256 Expansion: Symmetric padding for images, Class 0 for the label mask
-                pad_h, pad_w = 32, 32 
-                image_array = np.pad(image_array, ((0, 0), (pad_h, pad_h), (pad_w, pad_w)), mode='symmetric')
-                mask_array = np.pad(mask_array, ((pad_h, pad_h), (pad_w, pad_w)), mode='constant', constant_values=0)
+                # 2. Downscale Label Mask (192, 192) -> (64, 64) via 3x3 Majority Vote (Mode)
+                if mask_192.shape[0] == 192 and image_array.shape[1] == 64:
+                    # Reshape into (64, 64, 9) where 9 is the 3x3 pixel block
+                    mask_blocks = mask_192.reshape(64, 3, 64, 3).transpose(0, 2, 1, 3).reshape(64, 64, 9)
+                    mask_array = mode(mask_blocks, axis=-1, keepdims=False)[0].astype(np.int64)
+                else:
+                    mask_array = mask_192.astype(np.int64)
                 
                 _, h, w = image_array.shape
                 
+                # 3. Extract tiles (for patch_size=64 on 64x64, this extracts the exact 1 zone tile)
                 tile_idx = 0
                 for i in range(0, h - patch_size + 1, patch_size):
                     for j in range(0, w - patch_size + 1, patch_size):
                         mask_patch = mask_array[i:i+patch_size, j:j+patch_size].copy()
                         
-                        # Calculate ratio based on true sensor area, ignoring the synthetic padding
-                        effective_area = (192 * 192) if patch_size > 192 else (patch_size * patch_size)
+                        # Calculate ratio of target subset crops in the 64x64 tile
+                        effective_area = patch_size * patch_size
                         target_pixels = np.sum(np.isin(mask_patch, subset_classes))
                         pixel_ratio = target_pixels / effective_area
                         
@@ -448,7 +461,6 @@ class H2Crop:
                         # MASKING: Convert any pixel NOT in the subset to 0 (Background)
                         mask_patch[~np.isin(mask_patch, subset_classes)] = 0
                         
-                        # Calculate pixel histogram for frequency-aware splitting
                         unique, counts = np.unique(mask_patch, return_counts=True)
                         hist = dict(zip(unique, counts))
                         
