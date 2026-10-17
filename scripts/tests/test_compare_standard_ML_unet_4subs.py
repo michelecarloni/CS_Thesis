@@ -22,8 +22,8 @@ from H2Crop.data_structures import h2crop_taxonomy_dict
 # EXTERNAL CONFIGURATION VARIABLES
 patch_size = 64
 dataset_base = "../../ds"
-ml_checkpoints_base = "/media/michele/T7/checkpoints/checkpoints_6_standard_ML_tiles_4_subs_optuna_target_MacroF1score_patch_size_64_train_balanced"
-unet_checkpoints_base = "/media/michele/T7/checkpoints/checkpoints_6_unet_4subs_optuna_focal_dice_patch_size_64_train_balanced"
+ml_checkpoints_base = "/media/michele/T7/checkpoints/checkpoints_7_standard_ML_tiles_4_subs_no_hyp_pSize_64_random_split"
+unet_checkpoints_base = "/media/michele/T7/checkpoints/checkpoints_7_unet_pSize_64_random_split"
 img_out_dir = "../../img"
 
 
@@ -126,7 +126,7 @@ def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3):
                 
         # U-Net Models
         for encoder in unet_encoders:
-            checkpoint_path = os.path.join(unet_checkpoints_base, f"unet_enc_{encoder}", mod, f"subset_{subset_id}_pSize_{pSize}", f"epoch_{unet_epoch}.pth")
+            checkpoint_path = os.path.join(unet_checkpoints_base, f"unet_enc_{encoder}", mod, f"subset_{subset_id}_pSize_{pSize}", f"best_model.pth")    # f"epoch_{unet_epoch}.pth")   
             if os.path.exists(checkpoint_path):
                 state_dict = torch.load(checkpoint_path, map_location=device, weights_only=True)
                 
