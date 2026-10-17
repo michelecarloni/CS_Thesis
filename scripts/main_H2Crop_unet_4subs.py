@@ -50,6 +50,8 @@ if __name__ == "__main__":
     # ==========================================
     extract_4_subs_tiles(patch_sizes, subsets, modalities, loader, taxonomy, valid_threshold)
 
+    sys.exit(0)
+
     # ==========================================
     # 2. TRAINING PHASE (Deep Learning U-Net)
     # ==========================================

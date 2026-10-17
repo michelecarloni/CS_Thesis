@@ -342,18 +342,25 @@ class H2Crop:
         return sorted(kept_classes)
 
 
-    def extract_and_save_tiles_subset(self, save_base_dir, subset_classes, modality="hyperspectral", taxonomy=3, patch_size=32, max_files=None, max_workers=None, valid_threshold=0.40):
+    def extract_and_save_tiles_subset(self, save_base_dir, subset_classes, modality="hyperspectral", taxonomy=3, patch_size=64, max_files=None, max_workers=None, valid_threshold=0.10):
         """
-        Extracts tiles containing specific subset classes using CPU Multiprocessing.
-        Upsamples HSI using bilinear interpolation, symmetrically pads the area to 256x256, 
-        and drops tiles failing the area threshold.
+        Extracts segmentation tiles ensuring a shared train/val/test split across modalities
+        by splitting at the .h5 sample ID level first.
         """
         import concurrent.futures
         from functools import partial
+        import json
         
         final_save_dir = os.path.join(save_base_dir, f"{modality}_taxonomy_{taxonomy}_pSize_{patch_size}")
-        temp_dir = os.path.join(final_save_dir, "temp_all_tiles")
-        os.makedirs(temp_dir, exist_ok=True)
+        train_dir = os.path.join(final_save_dir, "train")
+        val_dir = os.path.join(final_save_dir, "validation")
+        test_dir = os.path.join(final_save_dir, "test")
+        
+        for d in [train_dir, val_dir, test_dir]:
+            os.makedirs(d, exist_ok=True)
+            
+        # Path for the shared split map at the subset base level so both modalities share it
+        shared_split_path = os.path.join(save_base_dir, "shared_split_mapping.json")
         
         h5_files = [f for f in os.listdir(self.h5_dir) if f.endswith('.h5')]
         if not h5_files:
@@ -363,20 +370,52 @@ class H2Crop:
         if max_files is not None:
             h5_files = h5_files[:max_files]
             
-        print(f"\n--- Extracting {patch_size}x{patch_size} Segmentation Tiles ({modality}) ---")
+        # 1. Create or load the shared file-level split (70/20/10) across modalities
+        if os.path.exists(shared_split_path):
+            print(f"[*] Found existing shared split mapping at {shared_split_path}. Loading splits...")
+            with open(shared_split_path, 'r') as f:
+                split_mapping = json.load(f)
+        else:
+            print(f"[*] Creating new 70/20/10 shared split mapping for all .h5 files...")
+            import random
+            random.seed(42)
+            shuffled_files = sorted([f for f in h5_files])
+            random.shuffle(shuffled_files)
+            
+            n_total = len(shuffled_files)
+            train_end = int(n_total * 0.70)
+            val_end = int(n_total * 0.90)
+            
+            split_mapping = {
+                "train": shuffled_files[:train_end],
+                "validation": shuffled_files[train_end:val_end],
+                "test": shuffled_files[val_end:]
+            }
+            os.makedirs(save_base_dir, exist_ok=True)
+            with open(shared_split_path, 'w') as f:
+                json.dump(split_mapping, f, indent=4)
+            print(f"[*] Saved shared split mapping to {shared_split_path}")
+
+        # Determine which split this specific run is processing
+        file_to_split = {}
+        for split_name, filenames in split_mapping.items():
+            for fname in filenames:
+                file_to_split[fname] = split_name
+
+        print(f"\n--- Extracting {patch_size}x{patch_size} Segmentation Tiles ({modality.upper()}) ---")
         print(f"Target Subset Classes: {subset_classes}")
-        print(f"Area Threshold: >= {valid_threshold*100}% of tile must be target crops")
-        print(f"Saving to: {final_save_dir}")
-        
-        tile_stats = [] 
+        print(f"Saving directly into shared split folders under: {final_save_dir}")
         
         worker_func = partial(
-            self._process_single_h5_file, 
+            self._process_single_h5_file_shared, 
             taxonomy=taxonomy, 
             modality=modality, 
             patch_size=patch_size, 
             subset_classes=subset_classes, 
-            temp_dir=temp_dir,
+            train_dir=train_dir,
+            val_dir=val_dir,
+            test_dir=test_dir,
+            file_to_split=file_to_split,
             valid_threshold=valid_threshold
         )
         
@@ -384,58 +423,57 @@ class H2Crop:
             results = list(tqdm(
                 executor.map(worker_func, h5_files), 
                 total=len(h5_files), 
-                desc=f"Extracting ({os.cpu_count() or 4} Cores)"
+                desc=f"Extracting & Routing ({modality})"
             ))
             
-        for res in results:
-            if res:
-                tile_stats.extend(res)
-                
-        print(f"\nExtraction complete! Found {len(tile_stats)} valid tiles meeting the threshold.")
-        
-        self._split_balanced_segmentation_tiles(tile_stats, final_save_dir, subset_classes, temp_dir)
+        total_extracted = sum(results)
+        print(f"\nExtraction complete for {modality}! Extracted {total_extracted} valid tiles.")
 
 
-    def _process_single_h5_file(self, filename, taxonomy, modality, patch_size, subset_classes, temp_dir, valid_threshold=0.05):
+    def _process_single_h5_file_shared(self, filename, taxonomy, modality, patch_size, subset_classes, train_dir, val_dir, test_dir, file_to_split, valid_threshold=0.10):
         """
-        Processes a single .h5 file at native 64x64 (30m) resolution:
-        - Hyperspectral: Kept at native (C, 64, 64).
-        - Multispectral: Downscaled from (C, 192, 192) to (C, 64, 64) using 3x3 block averaging.
-        - Label Mask: Downscaled from (192, 192) to (64, 64) using 3x3 majority voting (mode).
-        - No synthetic border padding is applied.
+        Processes a single .h5 file, downscales multispectral/hyperspectral correctly, 
+        and saves tiles directly into the shared train/val/test split folders.
         """
         import h5py
         import numpy as np
         from scipy.stats import mode
         
+        target_split = file_to_split.get(filename, None)
+        if target_split is None:
+            return 0  # File not in split mapping
+            
+        if target_split == "train":
+            dest_dir = train_dir
+        elif target_split == "validation":
+            dest_dir = val_dir
+        else:
+            dest_dir = test_dir
+            
         file_path = os.path.join(self.h5_dir, filename)
         sample_id = filename.replace('.h5', '')
-        local_tile_stats = []
+        extracted_count = 0
         
         try:
             with h5py.File(file_path, 'r') as h5f:
                 labels_full = np.array(h5f['label'])
-                mask_192 = labels_full[taxonomy]  # Native shape: (192, 192)
+                mask_192 = labels_full[taxonomy]  # Shape: (192, 192)
                 
-                # 1. Load Modality and align to (C, 64, 64)
                 if modality.lower() == "hyperspectral":
-                    # Native shape is already (218, 64, 64)
-                    image_array = np.array(h5f['EnMAP_data'], dtype=np.float32)
+                    image_array = np.array(h5f['EnMAP_data'], dtype=np.float32) # (218, 64, 64)
                 elif modality.lower() == "multispectral":
                     s2_full = np.array(h5f['S2_data'], dtype=np.float32)
                     month_str = filename[4:6]
                     s2_time_index = int(month_str) - 1
-                    s2_month = s2_full[s2_time_index]  # Shape: (10, 192, 192)
+                    s2_month = s2_full[s2_time_index] # (10, 192, 192)
                     
-                    # Downscale (C, 192, 192) -> (C, 64, 64) via exact 3x3 block mean
                     c = s2_month.shape[0]
                     image_array = s2_month.reshape(c, 64, 3, 64, 3).mean(axis=(2, 4))
                 else:
                     raise ValueError("Modality must be 'hyperspectral' or 'multispectral'")
                 
-                # 2. Downscale Label Mask (192, 192) -> (64, 64) via 3x3 Majority Vote (Mode)
+                # Downscale mask (192, 192) -> (64, 64) via 3x3 majority vote
                 if mask_192.shape[0] == 192 and image_array.shape[1] == 64:
-                    # Reshape into (64, 64, 9) where 9 is the 3x3 pixel block
                     mask_blocks = mask_192.reshape(64, 3, 64, 3).transpose(0, 2, 1, 3).reshape(64, 64, 9)
                     mask_array = mode(mask_blocks, axis=-1, keepdims=False)[0].astype(np.int64)
                 else:
@@ -443,39 +481,31 @@ class H2Crop:
                 
                 _, h, w = image_array.shape
                 
-                # 3. Extract tiles (for patch_size=64 on 64x64, this extracts the exact 1 zone tile)
                 tile_idx = 0
                 for i in range(0, h - patch_size + 1, patch_size):
                     for j in range(0, w - patch_size + 1, patch_size):
                         mask_patch = mask_array[i:i+patch_size, j:j+patch_size].copy()
                         
-                        # Calculate ratio of target subset crops in the 64x64 tile
                         effective_area = patch_size * patch_size
                         target_pixels = np.sum(np.isin(mask_patch, subset_classes))
                         pixel_ratio = target_pixels / effective_area
                         
-                        # Discard the tile if target crops fall below the threshold
                         if pixel_ratio < valid_threshold:
                             continue
                             
-                        # MASKING: Convert any pixel NOT in the subset to 0 (Background)
                         mask_patch[~np.isin(mask_patch, subset_classes)] = 0
                         
-                        unique, counts = np.unique(mask_patch, return_counts=True)
-                        hist = dict(zip(unique, counts))
-                        
                         img_patch = image_array[:, i:i+patch_size, j:j+patch_size]
-                        tile_filename = os.path.join(temp_dir, f"{sample_id}_tile_{tile_idx}.npz")
+                        tile_filename = os.path.join(dest_dir, f"{sample_id}_tile_{tile_idx}.npz")
                         
                         np.savez_compressed(tile_filename, X=img_patch, y=mask_patch)
-                        local_tile_stats.append({'path': tile_filename, 'hist': hist})
-                        
+                        extracted_count += 1
                         tile_idx += 1
                         
         except Exception as e:
             print(f"[Error] Failed to process {filename}: {str(e)}")
             
-        return local_tile_stats
+        return extracted_count
 
 
     def _split_balanced_segmentation_tiles(self, tile_stats, base_dir, subset_classes, temp_dir):
