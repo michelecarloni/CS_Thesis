@@ -345,7 +345,7 @@ class H2Crop:
     def extract_and_save_tiles_subset(self, save_base_dir, subset_classes, modality="hyperspectral", taxonomy=3, patch_size=64, max_files=None, max_workers=None, valid_threshold=0.10):
         """
         Extracts segmentation tiles ensuring a shared train/val/test split across modalities
-        by splitting at the .h5 sample ID level first.
+        by splitting at the .h5 sample ID level first, and writes split_summary.txt.
         """
         import concurrent.futures
         from functools import partial
@@ -396,7 +396,6 @@ class H2Crop:
                 json.dump(split_mapping, f, indent=4)
             print(f"[*] Saved shared split mapping to {shared_split_path}")
 
-        # Determine which split this specific run is processing
         file_to_split = {}
         for split_name, filenames in split_mapping.items():
             for fname in filenames:
@@ -426,8 +425,29 @@ class H2Crop:
                 desc=f"Extracting & Routing ({modality})"
             ))
             
-        total_extracted = sum(results)
-        print(f"\nExtraction complete for {modality}! Extracted {total_extracted} valid tiles.")
+        # 2. Count extracted tiles per split and write split_summary.txt
+        n_train = len([f for f in os.listdir(train_dir) if f.endswith('.npz')])
+        n_val = len([f for f in os.listdir(val_dir) if f.endswith('.npz')])
+        n_test = len([f for f in os.listdir(test_dir) if f.endswith('.npz')])
+        total_extracted = n_train + n_val + n_test
+        
+        print(f"\nExtraction complete for {modality}! Total Valid Tiles: {total_extracted}")
+        print(f" -> Train: {n_train} tiles")
+        print(f" -> Validation: {n_val} tiles")
+        print(f" -> Test: {n_test} tiles")
+
+        summary_path = os.path.join(final_save_dir, "split_summary.txt")
+        with open(summary_path, "w") as f:
+            f.write("--- Shared 70/20/10 Extraction Summary ---\n")
+            f.write(f"Modality: {modality}\n")
+            f.write(f"Subset Classes: {subset_classes}\n")
+            f.write(f"Total Tiles Extracted: {total_extracted}\n\n")
+            f.write("--- Tile Distribution ---\n")
+            f.write(f"Train Tiles: {n_train}\n")
+            f.write(f"Validation Tiles: {n_val}\n")
+            f.write(f"Test Tiles: {n_test}\n")
+
+        print(f"Summary saved to: {summary_path}")
 
 
     def _process_single_h5_file_shared(self, filename, taxonomy, modality, patch_size, subset_classes, train_dir, val_dir, test_dir, file_to_split, valid_threshold=0.10):
