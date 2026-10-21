@@ -20,7 +20,7 @@ if __name__ == "__main__":
     taxonomy = 3
     patch_sizes = [64]
     valid_threshold = 0.05  # Increased to ensure good crop density per tile
-    save_results_dir = "../results_7"
+    save_results_dir = "../results_8"
     
     # Exclusively use ResNet-18 encoder
     encoders = ["resnet18"]
@@ -30,7 +30,7 @@ if __name__ == "__main__":
     
     n_trials = 10
     epochs_per_trial = 15
-    final_epochs = 40       # Increased to 40 for CosineAnnealingLR convergence
+    final_epochs = 100       # Increased to 40 for CosineAnnealingLR convergence
     batch_size = 32         # Optimized batch size for 64x64 tiles
     encoder_depth = 4       # Matched with 64x64 tiles and ResNet-18
     debug = False
@@ -49,7 +49,6 @@ if __name__ == "__main__":
     # 1. SUBSET EXTRACTION PHASE
     # ==========================================
     extract_4_subs_tiles(patch_sizes, subsets, modalities, loader, taxonomy, valid_threshold)
-    sys.exit(0)
 
     # ==========================================
     # 2. TRAINING PHASE (Deep Learning U-Net)

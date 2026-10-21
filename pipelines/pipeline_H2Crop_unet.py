@@ -1,6 +1,7 @@
 import os
 import sys
 import gc
+import csv
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import ConfusionMatrixDisplay
@@ -12,7 +13,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from loss import OriginalCombinedLoss
+from loss import CombinedLoss
 
 
 def pipeline_H2Crop_unet(
@@ -79,17 +80,36 @@ def pipeline_H2Crop_unet(
     train_epochs = 2 if debug else epochs
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=train_epochs, eta_min=1e-5)
     
-    # Instantiate the updated Weighted CE + Foreground Dice loss
-    criterion = OriginalCombinedLoss(num_classes=num_classes, bg_weight=0.15).to(device)
+    # Instantiate the Combined Focal + Foreground Dice loss
+    criterion = CombinedLoss(num_classes=num_classes, bg_weight=0.15, gamma=2.0).to(device)
     
     history_train_loss = []
     history_val_loss = []
+    history_val_f1_per_class = {name: [] for name in target_names}
+    history_val_macro_f1_crops = []
+    
+    # Files for logging per-epoch validation F1 scores per class
+    val_f1_csv_path = os.path.join(results_out_dir, f"val_f1_per_epoch_subset_{subset_id}.csv")
+    val_f1_txt_path = os.path.join(results_out_dir, f"val_f1_per_epoch_subset_{subset_id}.txt")
+    
+    with open(val_f1_csv_path, mode='w', newline='') as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(["Epoch", "Val_Loss", "Crop_Macro_F1"] + target_names)
+        
+    with open(val_f1_txt_path, mode='w') as txt_file:
+        header_cols = " | ".join([f"{name[:15]:>15}" for name in target_names])
+        txt_file.write(f"--- Validation F1-Score Per Class Across Epochs ({model_name} | {modality} | Subset {subset_id}) ---\n\n")
+        txt_file.write(f"{'Epoch':>5} | {'Val Loss':>8} | {'Crop mF1':>8} | {header_cols}\n")
+        txt_file.write("-" * (32 + 18 * len(target_names)) + "\n")
     
     # Checkpointing Trackers
     best_val_macro_f1_crops = -1.0
     best_model_path = os.path.join(checkpoint_dir, "best_model.pth")
     
     for epoch in range(train_epochs):
+
+        # Resample common tiles & deterministic rare augmentations for this epoch
+        train_dataset.set_epoch(epoch)
 
         # 1. TRAINING PHASE
         model.train()
@@ -166,12 +186,12 @@ def pipeline_H2Crop_unet(
         avg_val_loss = running_val_loss / max(valid_val_batches, 1)
         history_val_loss.append(avg_val_loss)
         
-        # Calculate Validation F1 specifically for crops (ignoring Background class 0)
+        # Calculate Validation F1 for ALL classes and Macro F1 specifically for crops (ignoring Background class 0)
         val_cm_numpy = val_global_cm.cpu().numpy()
         val_macro_f1_crops = 0.0
+        epoch_class_f1s = []
         
-        # Start from index 1 to ignore Background (0)
-        for idx in range(1, num_classes):
+        for idx, class_name in enumerate(target_names):
             tp = val_cm_numpy[idx, idx]
             fp = val_cm_numpy[:, idx].sum() - tp
             fn = val_cm_numpy[idx, :].sum() - tp
@@ -179,12 +199,30 @@ def pipeline_H2Crop_unet(
             p = tp / (tp + fp) if (tp + fp) > 0 else 0.0
             r = tp / (tp + fn) if (tp + fn) > 0 else 0.0
             f1 = 2 * p * r / (p + r) if (p + r) > 0 else 0.0
-            val_macro_f1_crops += f1
+            
+            epoch_class_f1s.append(f1)
+            history_val_f1_per_class[class_name].append(f1)
+            
+            # Index > 0 corresponds to target crop classes
+            if idx > 0:
+                val_macro_f1_crops += f1
             
         val_macro_f1_crops /= (num_classes - 1)  # Average only over crop classes
+        history_val_macro_f1_crops.append(val_macro_f1_crops)
         current_lr = optimizer.param_groups[0]['lr']
+        
+        # Append this epoch's per-class F1 scores to CSV and TXT logs
+        with open(val_f1_csv_path, mode='a', newline='') as csv_file:
+            writer = csv.writer(csv_file)
+            writer.writerow([epoch + 1, f"{avg_val_loss:.4f}", f"{val_macro_f1_crops:.4f}"] + [f"{score:.4f}" for score in epoch_class_f1s])
             
+        with open(val_f1_txt_path, mode='a') as txt_file:
+            f1_cols = " | ".join([f"{score:>15.4f}" for score in epoch_class_f1s])
+            txt_file.write(f"{epoch+1:>5d} | {avg_val_loss:>8.4f} | {val_macro_f1_crops:>8.4f} | {f1_cols}\n")
+            
+        per_class_str = " | ".join([f"{name[:10]}: {score:.3f}" for name, score in zip(target_names, epoch_class_f1s)])
         print(f"    Epoch {epoch+1:02d}/{train_epochs} | LR: {current_lr:.2e} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f} | Val Crop mF1: {val_macro_f1_crops:.4f}")
+        print(f"      -> Val F1 per class: [{per_class_str}]")
         
         # CHECKPOINTING: Save best model based on Crop F1-Score
         if val_macro_f1_crops > best_val_macro_f1_crops:
@@ -197,15 +235,16 @@ def pipeline_H2Crop_unet(
         torch.save(model.state_dict(), epoch_filepath)
         
     print(f"    Saved {train_epochs} epoch checkpoints to: {checkpoint_dir}")
+    print(f"    Saved per-epoch Validation F1 logs to: {val_f1_txt_path} and {val_f1_csv_path}")
 
 
-    # 3. PLOT LEARNING CURVE
-    print("\n--- GENERATING LEARNING CURVE ---")
+    # 3. PLOT LEARNING CURVE & PER-CLASS VALIDATION F1 CURVE
+    print("\n--- GENERATING LEARNING CURVES ---")
     fig_lc, ax_lc = plt.subplots(figsize=(10, 6))
     ax_lc.plot(range(1, train_epochs + 1), history_train_loss, label='Train Combined Loss', marker='o')
     ax_lc.plot(range(1, train_epochs + 1), history_val_loss, label='Validation Combined Loss', marker='s')
     ax_lc.set_xlabel('Epoch')
-    ax_lc.set_ylabel('Weighted CE + Foreground Dice Loss (Lower is Better)')
+    ax_lc.set_ylabel('Focal + Foreground Dice Loss (Lower is Better)')
     ax_lc.set_title(f'Learning Curve: {model_name.upper()}\n({modality} | Subset {subset_id} | pSize {patch_size})')
     ax_lc.legend()
     ax_lc.grid(True, linestyle='--', alpha=0.7)
@@ -215,6 +254,23 @@ def pipeline_H2Crop_unet(
     plt.savefig(learning_curve_path, dpi=300)
     plt.close(fig_lc)
     print(f"    Saved Learning Curve to: {learning_curve_path}")
+
+    # Plot Per-Class Validation F1 Evolution
+    fig_f1, ax_f1 = plt.subplots(figsize=(10, 6))
+    for class_name, f1_list in history_val_f1_per_class.items():
+        ax_f1.plot(range(1, train_epochs + 1), f1_list, label=class_name, marker='o', markersize=4)
+    ax_f1.plot(range(1, train_epochs + 1), history_val_macro_f1_crops, label='Macro Avg (Crops Only)', linestyle='--', linewidth=2, color='black')
+    ax_f1.set_xlabel('Epoch')
+    ax_f1.set_ylabel('Validation F1-Score')
+    ax_f1.set_title(f'Validation F1-Score per Class Across Epochs: {model_name.upper()}\n({modality} | Subset {subset_id} | pSize {patch_size})')
+    ax_f1.legend(loc='best', fontsize=9)
+    ax_f1.grid(True, linestyle='--', alpha=0.7)
+    
+    val_f1_curve_path = os.path.join(results_out_dir, f"val_f1_per_class_subset_{subset_id}.png")
+    plt.tight_layout()
+    plt.savefig(val_f1_curve_path, dpi=300)
+    plt.close(fig_f1)
+    print(f"    Saved Per-Class Validation F1 Curve to: {val_f1_curve_path}")
 
 
     # 4. TEST EVALUATION
