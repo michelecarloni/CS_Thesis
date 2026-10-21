@@ -19,7 +19,7 @@ if __name__ == "__main__":
     modalities = ["hyperspectral", "multispectral"]
     taxonomy = 3
     patch_sizes = [64]
-    valid_threshold = 0.10  # Increased to ensure good crop density per tile
+    valid_threshold = 0.05  # Increased to ensure good crop density per tile
     save_results_dir = "../results_7"
     
     # Exclusively use ResNet-18 encoder
@@ -49,7 +49,7 @@ if __name__ == "__main__":
     # 1. SUBSET EXTRACTION PHASE
     # ==========================================
     extract_4_subs_tiles(patch_sizes, subsets, modalities, loader, taxonomy, valid_threshold)
-
+    sys.exit(0)
 
     # ==========================================
     # 2. TRAINING PHASE (Deep Learning U-Net)

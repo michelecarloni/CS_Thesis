@@ -345,11 +345,15 @@ class H2Crop:
     def extract_and_save_tiles_subset(self, save_base_dir, subset_classes, modality="hyperspectral", taxonomy=3, patch_size=64, max_files=None, max_workers=None, valid_threshold=0.10):
         """
         Extracts segmentation tiles ensuring a shared train/val/test split across modalities
-        by splitting at the .h5 sample ID level first, and writes split_summary.txt.
+        by splitting at the .h5 sample ID level first. Then, it applies a mild balancing 
+        to the train set, forcing secondary modalities (e.g., multispectral) to perfectly 
+        mirror the exact tile drops of the primary modality (hyperspectral).
         """
         import concurrent.futures
         from functools import partial
         import json
+        import os
+        from tqdm import tqdm
         
         final_save_dir = os.path.join(save_base_dir, f"{modality}_taxonomy_{taxonomy}_pSize_{patch_size}")
         train_dir = os.path.join(final_save_dir, "train")
@@ -361,6 +365,8 @@ class H2Crop:
             
         # Path for the shared split map at the subset base level so both modalities share it
         shared_split_path = os.path.join(save_base_dir, "shared_split_mapping.json")
+        # Path to sync the exact train tiles kept after mild balancing
+        shared_balance_path = os.path.join(save_base_dir, f"shared_balanced_train_pSize_{patch_size}.json")
         
         h5_files = [f for f in os.listdir(self.h5_dir) if f.endswith('.h5')]
         if not h5_files:
@@ -425,6 +431,28 @@ class H2Crop:
                 desc=f"Extracting & Routing ({modality})"
             ))
             
+        # CROSS-MODALITY SYNC FOR BALANCED TRAIN SET
+        if os.path.exists(shared_balance_path):
+            print(f"[*] Found shared balanced train list. Syncing {modality} train set to match exactly...")
+            with open(shared_balance_path, 'r') as f:
+                kept_train_basenames = set(json.load(f))
+                
+            deleted_sync = 0
+            for f_name in os.listdir(train_dir):
+                if f_name.endswith('.npz') and f_name not in kept_train_basenames:
+                    os.remove(os.path.join(train_dir, f_name))
+                    deleted_sync += 1
+            print(f"[*] Sync complete. Removed {deleted_sync} tiles to mirror the primary modality.")
+        else:
+            # Post-process the train directory to apply mild balancing (first modality only)
+            self._mild_balance_train_dir(train_dir, val_dir, subset_classes)
+            
+            # Save the resulting valid basenames to force the next modality to match
+            kept_train_basenames = [f for f in os.listdir(train_dir) if f.endswith('.npz')]
+            with open(shared_balance_path, 'w') as f:
+                json.dump(kept_train_basenames, f, indent=4)
+            print(f"[*] Saved balanced train list to {shared_balance_path} for cross-modality syncing.")
+            
         # 2. Count extracted tiles per split and write split_summary.txt
         n_train = len([f for f in os.listdir(train_dir) if f.endswith('.npz')])
         n_val = len([f for f in os.listdir(val_dir) if f.endswith('.npz')])
@@ -448,6 +476,75 @@ class H2Crop:
             f.write(f"Test Tiles: {n_test}\n")
 
         print(f"Summary saved to: {summary_path}")
+
+
+    def _mild_balance_train_dir(self, train_dir, val_dir, subset_classes):
+        """
+        Mildly balances the train set by capping majority classes to the mean class count.
+        Enforces a 'validation floor' so train samples are always > val samples.
+        """
+        import os
+        import numpy as np
+        import random
+        from scipy.stats import mode
+        from tqdm import tqdm
+        
+        print("\n--- Applying Mild Balancing (Soft Cap) to Train Set ---")
+        
+        def get_predominant_class_counts(directory):
+            class_to_files = {c: [] for c in subset_classes}
+            files = [os.path.join(directory, f) for f in os.listdir(directory) if f.endswith('.npz')]
+            
+            for fpath in tqdm(files, desc=f"Scanning {os.path.basename(directory)}"):
+                with np.load(fpath) as data:
+                    y = data['y']
+                    # Isolate only the pixels belonging to the target crops (ignore background)
+                    crop_pixels = y[np.isin(y, subset_classes)]
+                    if len(crop_pixels) > 0:
+                        predominant = int(mode(crop_pixels, keepdims=False)[0])
+                        # Only track it if the predominant class is actually one of our targets
+                        if predominant in class_to_files:
+                            class_to_files[predominant].append(fpath)
+            return class_to_files
+
+        # 1. Count validation tiles to establish the floor
+        val_class_to_files = get_predominant_class_counts(val_dir)
+        val_counts = {c: len(val_class_to_files[c]) for c in subset_classes}
+        
+        # 2. Count train tiles 
+        train_class_to_files = get_predominant_class_counts(train_dir)
+        train_counts = {c: len(train_class_to_files[c]) for c in subset_classes}
+        
+        # 3. Calculate the mild cap (Mean of train counts)
+        valid_train_counts = [count for count in train_counts.values() if count > 0]
+        mean_train_count = int(np.mean(valid_train_counts)) if valid_train_counts else 0
+        
+        deleted_total = 0
+        
+        for c in subset_classes:
+            t_count = train_counts[c]
+            v_count = val_counts.get(c, 0)
+            
+            # The cap is the mean, but strictly >= 2x the validation size
+            soft_cap = max(mean_train_count, int(v_count * 2.0))
+            
+            if t_count > soft_cap:
+                files_to_drop = t_count - soft_cap
+                print(f" -> Class {c}: Downsampling from {t_count} to {soft_cap} (Val size: {v_count})")
+                
+                # Shuffle deterministically and delete the excess files
+                random.seed(42)
+                random.shuffle(train_class_to_files[c])
+                drop_list = train_class_to_files[c][:files_to_drop]
+                
+                for fpath in drop_list:
+                    os.remove(fpath)
+                    
+                deleted_total += files_to_drop
+            else:
+                print(f" -> Class {c}: Kept all {t_count} tiles (Below cap {soft_cap}. Val size: {v_count})")
+                
+        print(f"\nMild balancing complete. Removed {deleted_total} excessive majority tiles from the train set.\n")
 
 
     def _process_single_h5_file_shared(self, filename, taxonomy, modality, patch_size, subset_classes, train_dir, val_dir, test_dir, file_to_split, valid_threshold=0.10):
