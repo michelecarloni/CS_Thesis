@@ -13,7 +13,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from loss import CombinedLoss
+from loss import OriginalCombinedLoss
 
 
 def pipeline_H2Crop_unet(
@@ -33,11 +33,17 @@ def pipeline_H2Crop_unet(
     encoder_depth=4,
     lr=1e-3,
     weight_decay=1e-4,
-    debug=False
+    debug=False,
+    train_aug_mode="minority_class_aug"
 ):
+    valid_modes = ["no_aug", "random_aug", "full_aug", "minority_class_aug"]
+    if train_aug_mode not in valid_modes:
+        raise ValueError(f"Invalid train_aug_mode '{train_aug_mode}'. Must be exactly one of: {valid_modes}")
+    
     print(f"\n{'='*70}")
     mode = "DEBUG MODE" if debug else "PRODUCTION MODE (FIXED HYPERPARAMS)"
     print(f"STARTING PIPELINE FOR: {model_name.upper()} | {modality.upper()} | Subset {subset_id} | {mode}")
+    print(f"Augmentation Mode: {train_aug_mode}")
     print(f"{'='*70}")
 
     results_out_dir = os.path.join(save_results_dir, modality)
@@ -47,7 +53,13 @@ def pipeline_H2Crop_unet(
     os.makedirs(checkpoint_dir, exist_ok=True)
     
     print("\n--- Initializing PyTorch DataLoaders ---")
-    train_dataset = H2CropTileDataset(os.path.join(dataset_dir, "train"), subset_classes=subset_classes, debug=debug)
+    # Pass the train_aug_mode flag strictly to the training dataset
+    train_dataset = H2CropTileDataset(
+        os.path.join(dataset_dir, "train"), 
+        subset_classes=subset_classes, 
+        debug=debug,
+        train_aug_mode=train_aug_mode
+    )
     val_dataset = H2CropTileDataset(os.path.join(dataset_dir, "validation"), subset_classes=subset_classes, debug=debug)
     test_dataset = H2CropTileDataset(os.path.join(dataset_dir, "test"), subset_classes=subset_classes, debug=debug)
     
@@ -81,7 +93,7 @@ def pipeline_H2Crop_unet(
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=train_epochs, eta_min=1e-5)
     
     # Instantiate the Combined Focal + Foreground Dice loss
-    criterion = CombinedLoss(num_classes=num_classes, bg_weight=0.15, gamma=2.0).to(device)
+    criterion = OriginalCombinedLoss(num_classes=num_classes, bg_weight=0.15, gamma=2.0).to(device)
     
     history_train_loss = []
     history_val_loss = []
@@ -108,7 +120,7 @@ def pipeline_H2Crop_unet(
     
     for epoch in range(train_epochs):
 
-        # Resample common tiles & deterministic rare augmentations for this epoch
+        # Resample common tiles & deterministic rare augmentations for this epoch based on the selected mode
         train_dataset.set_epoch(epoch)
 
         # 1. TRAINING PHASE

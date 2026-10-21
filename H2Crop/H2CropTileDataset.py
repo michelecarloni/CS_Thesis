@@ -11,12 +11,14 @@ from tqdm import tqdm
 class H2CropTileDataset(Dataset):
     """
     Custom PyTorch Dataset that loads 64x64 tiles from disk on the fly.
-    - On the 'train' split (IN-MEMORY ONLY, NO DISK DELETION):
-        1. Rare tiles are expanded into all 6 deterministic views every epoch:
-           [Original, Horizontal Flip, Vertical Flip, 90° Rot, 180° Rot, 270° Rot].
-        2. Common tiles cycle through disjoint chunks across epochs, and for each 
-           epoch, randomly decides whether to show the original tile or a randomly 
-           augmented version.
+    Supports four distinct training augmentation modes via train_aug_mode:
+      - 'no_aug': Trains normally without any augmentation (original tiles only).
+      - 'random_aug': For every tile, randomly chooses between no augmentation or one 
+        of the available augmentation techniques per epoch.
+      - 'full_aug': Increases dataset size by showing the original tile AND all 
+        its deterministic augmentations for EVERY tile in every epoch.
+      - 'minority_class_aug': Shows all augmentations for minority/rare class tiles, 
+        and random augmentations for the rest of the common tiles.
     """
     def __init__(
         self, 
@@ -24,13 +26,19 @@ class H2CropTileDataset(Dataset):
         subset_classes, 
         debug=False, 
         augment=None, 
+        train_aug_mode="minority_class_aug",
         min_rare_pixels_per_tile=10
     ):
         self.directory = directory
         self.subset_classes = sorted(subset_classes)
         self.debug = debug
+        self.train_aug_mode = train_aug_mode.lower()
         self.min_rare_pixels_per_tile = min_rare_pixels_per_tile
         
+        valid_modes = ["no_aug", "random_aug", "full_aug", "minority_class_aug"]
+        if self.train_aug_mode not in valid_modes:
+            raise ValueError(f"Invalid train_aug_mode '{train_aug_mode}'. Must be one of {valid_modes}")
+            
         self.filepaths = sorted(glob.glob(os.path.join(directory, "*.npz")))
         if debug:
             self.filepaths = self.filepaths[:10]
@@ -50,23 +58,24 @@ class H2CropTileDataset(Dataset):
         for new_idx, raw_label in enumerate(self.unique_classes):
             self.label_mapping[raw_label] = new_idx
 
-        # The 6 exhaustive deterministic views for rare tiles
-        self.rare_aug_modes = ["orig", "hflip", "vflip", "rot90", "rot180", "rot270"]
+        # The 6 deterministic views / augmentation techniques available
+        self.all_aug_modes = ["orig", "hflip", "vflip", "rot90", "rot180", "rot270"]
         
         self.rare_tile_paths = []
         self.common_tile_paths = []
         self.active_samples = []  # List of tuples: (filepath, aug_mode)
         
         if self.is_train:
-            self._prepare_dynamic_balancing()
+            self._prepare_dataset_partitioning()
             self.set_epoch(0)
         else:
+            # Validation and Test sets evaluate every tile exactly once without augmentation
             self.active_samples = [(fp, "orig") for fp in self.filepaths]
 
-    def _prepare_dynamic_balancing(self):
+    def _prepare_dataset_partitioning(self):
         """
-        Scans or loads cached metadata to partition training tiles into rare vs common.
-        Does NOT delete any files from disk.
+        Scans or loads cached metadata to partition training tiles into rare vs common 
+        (needed for 'minority_class_aug'). Does NOT delete any files from disk.
         """
         cache_path = os.path.join(self.directory, "tile_class_pixel_counts.json")
         tile_to_class_counts = {}
@@ -131,53 +140,67 @@ class H2CropTileDataset(Dataset):
             else:
                 self.common_tile_paths.append(fp)
 
-        # Chunk size for common tiles to match the 6x expanded rare pool size
-        num_rare_expanded = len(self.rare_tile_paths) * len(self.rare_aug_modes)
-        self.chunk_size_common = max(1, num_rare_expanded)
+        # Chunk size for common tiles (used in minority_class_aug to match expanded rare pool size)
+        num_rare_expanded = len(self.rare_tile_paths) * len(self.all_aug_modes)
+        self.chunk_size_common = max(1, num_rare_expanded) if len(self.rare_tile_paths) > 0 else len(self.filepaths)
         
         rng = random.Random(42)
         rng.shuffle(self.common_tile_paths)
+        rng.shuffle(self.rare_tile_paths)
 
-        print(f"    [Dynamic Balancer] Class Tile Counts (>={self.min_rare_pixels_per_tile} px): {class_tile_counts}")
-        print(f"    [Dynamic Balancer] Identified Rare Classes: {sorted(list(self.rare_classes))}")
-        print(f"    [Dynamic Balancer] Rare Tiles: {len(self.rare_tile_paths)} (x6 deterministic views = {num_rare_expanded} samples/epoch)")
-        print(f"    [Dynamic Balancer] Common Tiles Pool: {len(self.common_tile_paths)} (Slicing chunks of {self.chunk_size_common} per epoch)")
+        print(f"    [Augmentation Mode: {self.train_aug_mode}]")
+        print(f"    -> Rare Tiles: {len(self.rare_tile_paths)} | Common Tiles: {len(self.common_tile_paths)}")
 
     def set_epoch(self, epoch):
         """
-        Rebuilds active training samples for the epoch:
-        - All rare tiles get all 6 views (orig, hflip, vflip, rot90, rot180, rot270).
-        - A rotating chunk of common tiles is selected, with a random flag to show 
-          either original or a randomly augmented version.
+        Rebuilds active training samples depending on the selected train_aug_mode:
+        - 'no_aug': Shows every tile exactly once as original.
+        - 'random_aug': Shows every tile once, tagging it for a random augmentation decision.
+        - 'full_aug': Expands EVERY tile in the dataset into all 6 views every epoch.
+        - 'minority_class_aug': Expands rare tiles into all 6 views; cycles through 
+          common tiles with random augmentation.
         """
         if not self.is_train:
             return
 
-        # 1. Expand all rare tiles into 6 deterministic views
-        rare_samples = []
-        for fp in self.rare_tile_paths:
-            for mode in self.rare_aug_modes:
-                rare_samples.append((fp, mode))
+        self.active_samples = []
 
-        # 2. Extract a chunk of common tiles for this epoch
-        total_common = len(self.common_tile_paths)
-        if total_common > 0:
-            start_idx = (epoch * self.chunk_size_common) % total_common
-            end_idx = start_idx + self.chunk_size_common
-            
-            if end_idx <= total_common:
-                epoch_common_paths = self.common_tile_paths[start_idx:end_idx]
-            else:
-                epoch_common_paths = self.common_tile_paths[start_idx:] + self.common_tile_paths[:end_idx % total_common]
-            
-            # For common tiles, tag them as "common_mix" so __getitem__ can randomly 
-            # decide whether to keep them original or apply a random augmentation
-            common_samples = [(fp, "common_mix") for fp in epoch_common_paths]
-        else:
-            common_samples = []
+        if self.train_aug_mode == "no_aug":
+            # Every tile shown once as original
+            for fp in self.filepaths:
+                self.active_samples.append((fp, "orig"))
+
+        elif self.train_aug_mode == "random_aug":
+            # Every tile shown once, tagged to randomly pick an augmentation per epoch
+            for fp in self.filepaths:
+                self.active_samples.append((fp, "random_choice"))
+
+        elif self.train_aug_mode == "full_aug":
+            # EVERY tile is expanded into all 6 views every epoch to massively scale dataset size
+            for fp in self.filepaths:
+                for mode in self.all_aug_modes:
+                    self.active_samples.append((fp, mode))
+
+        elif self.train_aug_mode == "minority_class_aug":
+            # Rare tiles get all 6 views; common tiles cycle through chunks with random augmentations
+            for fp in self.rare_tile_paths:
+                for mode in self.all_aug_modes:
+                    self.active_samples.append((fp, mode))
+
+            total_common = len(self.common_tile_paths)
+            if total_common > 0:
+                start_idx = (epoch * self.chunk_size_common) % total_common
+                end_idx = start_idx + self.chunk_size_common
+                
+                if end_idx <= total_common:
+                    epoch_common_paths = self.common_tile_paths[start_idx:end_idx]
+                else:
+                    epoch_common_paths = self.common_tile_paths[start_idx:] + self.common_tile_paths[:end_idx % total_common]
+                
+                for fp in epoch_common_paths:
+                    self.active_samples.append((fp, "random_choice"))
 
         rng = random.Random(42 + epoch)
-        self.active_samples = rare_samples + common_samples
         rng.shuffle(self.active_samples)
 
     def __len__(self):
@@ -212,17 +235,23 @@ class H2CropTileDataset(Dataset):
         elif aug_mode == "rot270":
             X = torch.rot90(X, k=3, dims=[1, 2])
             y = torch.rot90(y, k=3, dims=[0, 1])
-        elif aug_mode == "common_mix":
-            # For common tiles: 50% chance to stay original, 50% chance for random augmentation
-            if random.random() > 0.5:
-                if random.random() > 0.5:
-                    X = torch.flip(X, dims=[2])
-                    y = torch.flip(y, dims=[1])
-                if random.random() > 0.5:
-                    X = torch.flip(X, dims=[1])
-                    y = torch.flip(y, dims=[0])
-                k = random.randint(1, 3)
-                X = torch.rot90(X, k=k, dims=[1, 2])
-                y = torch.rot90(y, k=k, dims=[0, 1])
+        elif aug_mode == "random_choice":
+            # Either stays original (None) or picks 1 random augmentation technique
+            choice = random.choice(["none", "hflip", "vflip", "rot90", "rot180", "rot270"])
+            if choice == "hflip":
+                X = torch.flip(X, dims=[2])
+                y = torch.flip(y, dims=[1])
+            elif choice == "vflip":
+                X = torch.flip(X, dims=[1])
+                y = torch.flip(y, dims=[0])
+            elif choice == "rot90":
+                X = torch.rot90(X, k=1, dims=[1, 2])
+                y = torch.rot90(y, k=1, dims=[0, 1])
+            elif choice == "rot180":
+                X = torch.rot90(X, k=2, dims=[1, 2])
+                y = torch.rot90(y, k=2, dims=[0, 1])
+            elif choice == "rot270":
+                X = torch.rot90(X, k=3, dims=[1, 2])
+                y = torch.rot90(y, k=3, dims=[0, 1])
                 
         return X, y
