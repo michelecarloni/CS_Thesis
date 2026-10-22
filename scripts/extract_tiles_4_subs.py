@@ -1,6 +1,5 @@
 import os
 
-
 def extract_4_subs_tiles(patch_sizes, subsets, modalities, loader, taxonomy, valid_threshold):
     print("\n--- Starting Subset Extraction Phase ---")
     for patch_size in patch_sizes:
@@ -8,7 +7,8 @@ def extract_4_subs_tiles(patch_sizes, subsets, modalities, loader, taxonomy, val
         print(f"STARTING PROCESSING FOR PATCH SIZE: {patch_size}x{patch_size}")
         print(f"{'='*60}")
         
-        for subset_id, subset_classes in subsets.items():
+        # UNPACK THE TUPLE HERE
+        for subset_id, (subset_classes, minority_classes) in subsets.items():
             print(f"\n{'='*50}")
             print(f"PROCESSING SUBSET {subset_id}: {subset_classes} (Patch Size: {patch_size})")
             print(f"{'='*50}")

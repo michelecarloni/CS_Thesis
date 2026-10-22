@@ -19,7 +19,7 @@ if __name__ == "__main__":
     modalities = ["hyperspectral", "multispectral"]
     taxonomy = 3
     patch_sizes = [64]
-    valid_threshold = 0.05  # Increased to ensure good crop density per tile
+    valid_threshold = 0.10  # Increased to ensure good crop density per tile
     save_results_dir = "../results_8"
     
     # Exclusively use ResNet-18 encoder
@@ -34,7 +34,9 @@ if __name__ == "__main__":
     batch_size = 32         # Optimized batch size for 64x64 tiles
     encoder_depth = 4       # Matched with 64x64 tiles and ResNet-18
     debug = False
+    train_aug_mode = "minority_class_aug"
     
+    # DICTIONARY: (all_classes, minority_classes)
     subsets = {
         1: ([8, 11, 23, 56], [56]),
         2: ([13, 30, 38, 53, 61], [13, 53, 61]),
@@ -50,6 +52,7 @@ if __name__ == "__main__":
     # ==========================================
     extract_4_subs_tiles(patch_sizes, subsets, modalities, loader, taxonomy, valid_threshold)
 
+
     # ==========================================
     # 2. TRAINING PHASE (Deep Learning U-Net)
     # ==========================================
@@ -60,7 +63,8 @@ if __name__ == "__main__":
             
             current_results_dir = os.path.join(save_results_dir, f"unet_enc_{encoder}_{patch_size}")
             
-            for subset_id, subset_classes in subsets.items():
+            # UNPACK THE TUPLE HERE
+            for subset_id, (subset_classes, minority_classes) in subsets.items():
                 save_base_dir = f"../ds/H2Crop_tiles_ds_subset_{subset_id}"
                 
                 for mod in modalities:
@@ -82,6 +86,7 @@ if __name__ == "__main__":
                             dataset_dir=dataset_dir,
                             subset_id=subset_id,
                             subset_classes=subset_classes,
+                            minority_classes=minority_classes, # PASS EXPLICITLY TO PIPELINE
                             modality=mod,
                             taxonomy=taxonomy,
                             patch_size=patch_size,
@@ -91,7 +96,8 @@ if __name__ == "__main__":
                             encoder_depth=encoder_depth,
                             lr=1e-3,
                             weight_decay=1e-4,
-                            debug=debug
+                            debug=debug,
+                            train_aug_mode=train_aug_mode
                         )
                     else:
                         print(f"[Error] Dataset directory {dataset_dir} missing. Skipping training for this config.")

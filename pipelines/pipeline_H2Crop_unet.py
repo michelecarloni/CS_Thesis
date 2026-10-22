@@ -13,7 +13,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from loss import OriginalCombinedLoss
+from loss import CombinedLoss
 
 
 def pipeline_H2Crop_unet(
@@ -24,6 +24,7 @@ def pipeline_H2Crop_unet(
     dataset_dir, 
     subset_id, 
     subset_classes,
+    minority_classes, 
     modality, 
     taxonomy=3, 
     patch_size=64, 
@@ -36,10 +37,11 @@ def pipeline_H2Crop_unet(
     debug=False,
     train_aug_mode="minority_class_aug"
 ):
+    # INPUT VALIDATION
     valid_modes = ["no_aug", "random_aug", "full_aug", "minority_class_aug"]
     if train_aug_mode not in valid_modes:
         raise ValueError(f"Invalid train_aug_mode '{train_aug_mode}'. Must be exactly one of: {valid_modes}")
-    
+
     print(f"\n{'='*70}")
     mode = "DEBUG MODE" if debug else "PRODUCTION MODE (FIXED HYPERPARAMS)"
     print(f"STARTING PIPELINE FOR: {model_name.upper()} | {modality.upper()} | Subset {subset_id} | {mode}")
@@ -53,15 +55,26 @@ def pipeline_H2Crop_unet(
     os.makedirs(checkpoint_dir, exist_ok=True)
     
     print("\n--- Initializing PyTorch DataLoaders ---")
-    # Pass the train_aug_mode flag strictly to the training dataset
+    # Pass the train_aug_mode and minority_classes directly to the dataset instances
     train_dataset = H2CropTileDataset(
         os.path.join(dataset_dir, "train"), 
         subset_classes=subset_classes, 
+        minority_classes=minority_classes,
         debug=debug,
         train_aug_mode=train_aug_mode
     )
-    val_dataset = H2CropTileDataset(os.path.join(dataset_dir, "validation"), subset_classes=subset_classes, debug=debug)
-    test_dataset = H2CropTileDataset(os.path.join(dataset_dir, "test"), subset_classes=subset_classes, debug=debug)
+    val_dataset = H2CropTileDataset(
+        os.path.join(dataset_dir, "validation"), 
+        subset_classes=subset_classes, 
+        minority_classes=minority_classes,
+        debug=debug
+    )
+    test_dataset = H2CropTileDataset(
+        os.path.join(dataset_dir, "test"), 
+        subset_classes=subset_classes, 
+        minority_classes=minority_classes,
+        debug=debug
+    )
     
     num_workers = 0 if debug else min(4, os.cpu_count() or 1)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=use_gpu)
@@ -92,8 +105,8 @@ def pipeline_H2Crop_unet(
     train_epochs = 2 if debug else epochs
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=train_epochs, eta_min=1e-5)
     
-    # Instantiate the Combined Focal + Foreground Dice loss
-    criterion = OriginalCombinedLoss(num_classes=num_classes, bg_weight=0.15, gamma=2.0).to(device)
+    # Instantiate the loss
+    criterion = CombinedLoss(num_classes=num_classes, bg_weight=0.15, gamma=2.0).to(device)
     
     history_train_loss = []
     history_val_loss = []
@@ -120,7 +133,7 @@ def pipeline_H2Crop_unet(
     
     for epoch in range(train_epochs):
 
-        # Resample common tiles & deterministic rare augmentations for this epoch based on the selected mode
+        # Resample common tiles & deterministic rare augmentations for this epoch based on train_aug_mode
         train_dataset.set_epoch(epoch)
 
         # 1. TRAINING PHASE
