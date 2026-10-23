@@ -7,7 +7,6 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-import matplotlib.patheffects as pe
 from matplotlib.colors import ListedColormap
 import uuid
 
@@ -28,12 +27,12 @@ unet_checkpoints_base = "/media/michele/T7/checkpoints/checkpoints_8_unet_pSize_
 img_out_dir = "../../img"
 
 
-def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3):
+def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3, unet_encoders=["resnet18"]):
     """
     Generates comparative plots combining Hyperspectral and Multispectral rows in the SAME image.
     Interleaves the rows: HSI Sample 1, MSI Sample 1, HSI Sample 2, MSI Sample 2, etc.
     Utilizes synchronized sampling to ensure modalities display the exact same geographic tile.
-    Includes a foreground pixel accuracy overlay for each model's prediction.
+    Plots Mean Intersection over Union (mIoU) AND Overall Accuracy (OA) below each prediction image.
     """
     print(f"\n{'='*70}")
     print(f"GENERATING COMBINED INFERENCE PLOTS | Subset {subset_id} | pSize {pSize}")
@@ -42,7 +41,6 @@ def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3):
     # CONFIGURATION & PATHS
     modalities = ["hyperspectral", "multispectral"]
     ml_models = ["decision_tree", "random_forest", "logistic_regression", "linear_svm"]
-    unet_encoders = ["resnet18", "resnet50"]
     
     titles = ["Ground Truth"] + [m.replace('_', ' ').title() for m in ml_models] + [f"UNET-{e.replace('resnet', 'ResNet')}" for e in unet_encoders]
 
@@ -55,8 +53,6 @@ def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3):
     subset_classes = subsets[subset_id]
     num_classes = len(subset_classes) + 1
 
-    unet_epoch = 12
-    
     # COLORMAP & LEGEND SETUP
     unique_classes = [0] + sorted(subset_classes)
     taxonomy_key = f'Taxonomy_{taxonomy}'
@@ -85,7 +81,6 @@ def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3):
     hyper_files = set(os.path.basename(f) for f in glob.glob(os.path.join(hyper_test_dir, "*.npz")))
     multi_files = set(os.path.basename(f) for f in glob.glob(os.path.join(multi_test_dir, "*.npz")))
     
-    # Ensure we only pick files that exist in both modalities
     common_files = list(hyper_files.intersection(multi_files))
     
     if not common_files:
@@ -106,29 +101,25 @@ def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3):
     ml_networks = {"hyperspectral": {}, "multispectral": {}}
     unet_networks = {"hyperspectral": {}, "multispectral": {}}
     
-    # Check if 'optuna' is in the ML checkpoints path
     use_optuna = "optuna" in ml_checkpoints_base.lower()
     suffix = "_optuna" if use_optuna else ""
     
     for mod in modalities:
         in_channels = 218 if mod == "hyperspectral" else 10
             
-        # Scaler - dynamically constructed
         scaler_filename = f"scaler_tiles_subset_{subset_id}_tax_{taxonomy}_pSize_{pSize}{suffix}.joblib"
         scaler_path = os.path.join(ml_checkpoints_base, "scalers", mod, scaler_filename)
         if os.path.exists(scaler_path):
             scalers[mod] = joblib.load(scaler_path)
             
-        # ML Models - dynamically constructed
         for ml_algo in ml_models:
             model_filename = f"{ml_algo}_tiles_subset_{subset_id}_tax_{taxonomy}_pSize_{pSize}{suffix}.joblib"
             ml_model_path = os.path.join(ml_checkpoints_base, ml_algo, mod, model_filename)
             if os.path.exists(ml_model_path):
                 ml_networks[mod][ml_algo] = joblib.load(ml_model_path)
                 
-        # U-Net Models
         for encoder in unet_encoders:
-            checkpoint_path = os.path.join(unet_checkpoints_base, f"unet_enc_{encoder}", mod, f"subset_{subset_id}_pSize_{pSize}", f"best_model.pth")    # f"epoch_{unet_epoch}.pth")   
+            checkpoint_path = os.path.join(unet_checkpoints_base, f"unet_enc_{encoder}", mod, f"subset_{subset_id}_pSize_{pSize}", f"best_model.pth")
             if os.path.exists(checkpoint_path):
                 state_dict = torch.load(checkpoint_path, map_location=device, weights_only=True)
                 
@@ -148,10 +139,19 @@ def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3):
                 model.eval()
                 unet_networks[mod][encoder] = model
 
-
     # 3. COMBINED BATCH INFERENCE & PLOT
-    chunk_size = 3
+    chunk_size = 1
     num_chunks = int(np.ceil(num_samples / chunk_size))
+
+    num_plots_row = 5 + len(unet_encoders)
+    
+    # Safely assign mul_k based on the number of columns, with a fallback
+    if num_plots_row == 7:
+        mul_k = 4
+    elif num_plots_row == 6:
+        mul_k = 5
+    else:
+        mul_k = 4
     
     for chunk_idx in range(num_chunks):
         start_idx = chunk_idx * chunk_size
@@ -166,11 +166,15 @@ def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3):
             
         print(f"\n    Generating plot batch {chunk_idx+1}/{num_chunks} ({nrows} rows total)...")
         
-        fig, axes = plt.subplots(nrows, 7, figsize=(24, 4 * nrows))
+        # hspace increased to 0.45 to ensure room for the metrics printed below the image
+        fig, axes = plt.subplots(nrows,
+                                num_plots_row,
+                                figsize=(24, mul_k * nrows),
+                                gridspec_kw={'hspace': 0.45, 'wspace': 0.05}
+                                )
         axes = np.atleast_2d(axes) 
         
         current_row = 0
-        
         max_chunk_len = max(len(hyper_chunk), len(multi_chunk))
         
         for file_idx in range(max_chunk_len):
@@ -188,6 +192,7 @@ def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3):
                     y_true = data['y']
                     
                 H, W = y_true.shape
+                total_px = y_true.size
                 predictions = [y_true]
                 
                 # A) ML Inference
@@ -214,10 +219,6 @@ def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3):
                         else:
                             predictions.append(np.zeros((H, W)))
 
-                # Foreground mask calculation for accuracy metrics (ignores Background Class 0)
-                foreground_mask = (y_true != 0)
-                total_foreground_px = np.sum(foreground_mask)
-
                 # C) Plot Row
                 for col_idx, (pred_raw_grid, title) in enumerate(zip(predictions, titles)):
                     ax = axes[current_row, col_idx]
@@ -234,28 +235,38 @@ def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3):
                     if col_idx == 0:
                         ax.set_ylabel(f"{mod.title()}\nSample {start_idx + file_idx + 1}", fontsize=14, labelpad=15, rotation=90)
                     else:
-                        # Overlay Foreground Pixel Accuracy Ratio
-                        if total_foreground_px > 0:
-                            correct_foreground = np.sum((pred_raw_grid == y_true) & foreground_mask)
-                            fg_acc = correct_foreground / total_foreground_px
-                            overlay_text = f"FG Acc: {fg_acc:.1%}"
+                        # 1. Overall Accuracy (including background)
+                        correct_px = np.sum(pred_raw_grid == y_true)
+                        acc = correct_px / total_px if total_px > 0 else 0.0
+
+                        # 2. Mean IoU (excluding background)
+                        present_classes = np.unique(y_true)
+                        present_classes = present_classes[present_classes != 0] # exclude background class 0
+                        
+                        if len(present_classes) > 0:
+                            iou_list = []
+                            for c in present_classes:
+                                intersection = np.sum((pred_raw_grid == c) & (y_true == c))
+                                union = np.sum((pred_raw_grid == c) | (y_true == c))
+                                iou_list.append(intersection / union if union > 0 else 0.0)
+                            mIoU = np.mean(iou_list)
+                            miou_text = f"mIoU: {mIoU:.1%}"
                         else:
-                            overlay_text = "No FG px"
+                            miou_text = "mIoU: N/A"
                             
-                        ax.text(
-                            0.04, 0.04, overlay_text, transform=ax.transAxes, 
-                            color='white', fontsize=12, fontweight='bold',
-                            path_effects=[pe.withStroke(linewidth=2, foreground="black")]
-                        )
+                        # Combine both metrics to be displayed below the image
+                        metrics_text = f"{miou_text} | OA: {acc:.1%}"
+                        
+                        # Plot metrics text directly under the x-axis of each image plot
+                        ax.set_xlabel(metrics_text, fontsize=12, fontweight='bold', color='black', labelpad=8)
                 
                 current_row += 1
                 
-        # D) Add Legend & Finalize
-        plt.tight_layout(rect=[0, 0.08, 1, 1])
+        # D) Add Legend & Finalize (tight_layout removed to prevent warnings)
+        fig.subplots_adjust(bottom=0.15)
         fig.legend(handles=legend_patches, loc='lower center', ncol=len(unique_classes), 
                    bbox_to_anchor=(0.5, 0.02), fontsize=14, frameon=False)
         
-        # Build the final output filename using a random 8-character string
         random_id = uuid.uuid4().hex[:8]
         out_file = os.path.join(img_out_dir, f"inference_sub{subset_id}_combined_batch_{chunk_idx+1}_{random_id}.png")
         
@@ -265,10 +276,10 @@ def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3):
     print(f"\nAll batched plots saved successfully to {img_out_dir}!")
 
 
-def plot_all_inference_comparisons(subset_id, pSize, taxonomy=3):
+def plot_all_inference_comparisons(subset_id, pSize, taxonomy=3, unet_encoders=["resnet18"]):
     """
     Generates comparative plots combining Hyperspectral and Multispectral rows in the SAME image
-    for ALL tiles present in the test set. Includes foreground accuracy overlay.
+    for ALL tiles present in the test set. Overlays both mIoU and Overall Accuracy universally below each plot.
     """
     print(f"\n{'='*70}")
     print(f"GENERATING FULL TEST SET INFERENCE PLOTS | Subset {subset_id} | pSize {pSize}")
@@ -277,7 +288,6 @@ def plot_all_inference_comparisons(subset_id, pSize, taxonomy=3):
     # CONFIGURATION & PATHS
     modalities = ["hyperspectral", "multispectral"]
     ml_models = ["decision_tree", "random_forest", "logistic_regression", "linear_svm"]
-    unet_encoders = ["resnet18", "resnet50"]
     
     titles = ["Ground Truth"] + [m.replace('_', ' ').title() for m in ml_models] + [f"UNET-{e.replace('resnet', 'ResNet')}" for e in unet_encoders]
 
@@ -304,7 +314,6 @@ def plot_all_inference_comparisons(subset_id, pSize, taxonomy=3):
     raw_to_plot_idx = {raw: idx for idx, raw in enumerate(unique_classes)}
     map_to_plot = np.vectorize(lambda x: raw_to_plot_idx.get(x, 0)) 
 
-    # Construct the specific dataset path dynamically
     current_dataset_base = os.path.join(dataset_base, f"H2Crop_tiles_ds_subset_{subset_id}")
     os.makedirs(img_out_dir, exist_ok=True)
 
@@ -318,14 +327,12 @@ def plot_all_inference_comparisons(subset_id, pSize, taxonomy=3):
     hyper_files = set(os.path.basename(f) for f in glob.glob(os.path.join(hyper_test_dir, "*.npz")))
     multi_files = set(os.path.basename(f) for f in glob.glob(os.path.join(multi_test_dir, "*.npz")))
     
-    # Extract all matching files
     common_files = list(hyper_files.intersection(multi_files))
     
     if not common_files:
         print("[Error] No common test files found between hyperspectral and multispectral directories.")
         return
         
-    # Sort files to process deterministically 
     sampled_basenames = sorted(common_files)
     num_samples = len(sampled_basenames)
     
@@ -380,8 +387,18 @@ def plot_all_inference_comparisons(subset_id, pSize, taxonomy=3):
                 unet_networks[mod][encoder] = model
 
     # 3. COMBINED BATCH INFERENCE & PLOT
-    chunk_size = 3
+    chunk_size = 1
     num_chunks = int(np.ceil(num_samples / chunk_size))
+
+    num_plots_row = 5 + len(unet_encoders)
+    
+    # Safely assign mul_k based on the number of columns, with a fallback
+    if num_plots_row == 7:
+        mul_k = 4
+    elif num_plots_row == 6:
+        mul_k = 5
+    else:
+        mul_k = 4
     
     for chunk_idx in range(num_chunks):
         start_idx = chunk_idx * chunk_size
@@ -396,11 +413,15 @@ def plot_all_inference_comparisons(subset_id, pSize, taxonomy=3):
             
         print(f"\n    Generating plot batch {chunk_idx+1}/{num_chunks} ({nrows} rows total)...")
         
-        fig, axes = plt.subplots(nrows, 7, figsize=(24, 4 * nrows))
+        # hspace increased to 0.45 to ensure room for the metrics printed below the image
+        fig, axes = plt.subplots(nrows,
+                                num_plots_row,
+                                figsize=(24, mul_k * nrows),
+                                gridspec_kw={'hspace': 0.45, 'wspace': 0.05}
+                                )
         axes = np.atleast_2d(axes) 
         
         current_row = 0
-        
         max_chunk_len = max(len(hyper_chunk), len(multi_chunk))
         
         for file_idx in range(max_chunk_len):
@@ -418,6 +439,7 @@ def plot_all_inference_comparisons(subset_id, pSize, taxonomy=3):
                     y_true = data['y']
                     
                 H, W = y_true.shape
+                total_px = y_true.size
                 predictions = [y_true]
                 
                 # A) ML Inference
@@ -444,10 +466,6 @@ def plot_all_inference_comparisons(subset_id, pSize, taxonomy=3):
                         else:
                             predictions.append(np.zeros((H, W)))
 
-                # Foreground mask calculation for accuracy metrics
-                foreground_mask = (y_true != 0)
-                total_foreground_px = np.sum(foreground_mask)
-
                 # C) Plot Row
                 for col_idx, (pred_raw_grid, title) in enumerate(zip(predictions, titles)):
                     ax = axes[current_row, col_idx]
@@ -464,28 +482,38 @@ def plot_all_inference_comparisons(subset_id, pSize, taxonomy=3):
                     if col_idx == 0:
                         ax.set_ylabel(f"{mod.title()}\nSample {start_idx + file_idx + 1}", fontsize=14, labelpad=15, rotation=90)
                     else:
-                        # Overlay Foreground Pixel Accuracy Ratio
-                        if total_foreground_px > 0:
-                            correct_foreground = np.sum((pred_raw_grid == y_true) & foreground_mask)
-                            fg_acc = correct_foreground / total_foreground_px
-                            overlay_text = f"FG Acc: {fg_acc:.1%}"
+                        # 1. Overall Accuracy (including background)
+                        correct_px = np.sum(pred_raw_grid == y_true)
+                        acc = correct_px / total_px if total_px > 0 else 0.0
+
+                        # 2. Mean IoU (excluding background)
+                        present_classes = np.unique(y_true)
+                        present_classes = present_classes[present_classes != 0] # exclude background class 0
+                        
+                        if len(present_classes) > 0:
+                            iou_list = []
+                            for c in present_classes:
+                                intersection = np.sum((pred_raw_grid == c) & (y_true == c))
+                                union = np.sum((pred_raw_grid == c) | (y_true == c))
+                                iou_list.append(intersection / union if union > 0 else 0.0)
+                            mIoU = np.mean(iou_list)
+                            miou_text = f"mIoU: {mIoU:.1%}"
                         else:
-                            overlay_text = "No FG px"
+                            miou_text = "mIoU: N/A"
                             
-                        ax.text(
-                            0.04, 0.04, overlay_text, transform=ax.transAxes, 
-                            color='white', fontsize=12, fontweight='bold',
-                            path_effects=[pe.withStroke(linewidth=2, foreground="black")]
-                        )
+                        # Combine both metrics to be displayed below the image
+                        metrics_text = f"{miou_text} | OA: {acc:.1%}"
+                        
+                        # Plot metrics text directly under the x-axis of each image plot
+                        ax.set_xlabel(metrics_text, fontsize=12, fontweight='bold', color='black', labelpad=8)
                 
                 current_row += 1
                 
-        # D) Add Legend & Finalize
-        plt.tight_layout(rect=[0, 0.08, 1, 1])
+        # D) Add Legend & Finalize (tight_layout removed to prevent warnings)
+        fig.subplots_adjust(bottom=0.15)
         fig.legend(handles=legend_patches, loc='lower center', ncol=len(unique_classes), 
                    bbox_to_anchor=(0.5, 0.02), fontsize=14, frameon=False)
         
-        # Build the final output filename including a chunk identifier
         out_file = os.path.join(img_out_dir, f"inference_sub{subset_id}_all_batch_{chunk_idx+1}.png")
         
         plt.savefig(out_file, dpi=300, bbox_inches='tight', facecolor='white')
@@ -494,17 +522,18 @@ def plot_all_inference_comparisons(subset_id, pSize, taxonomy=3):
     print(f"\nAll full-test-set batched plots saved successfully to {img_out_dir}!")
 
 
+
 """
- if __name__ == "__main__":
-     sub_list = [1,2,3,4]
-     num_iter = 20
+if __name__ == "__main__":
+    sub_list = [1,2,3,4]
+    num_iter = 20
  
-     for sub in sub_list:
-         for i in range (0, num_iter):
-             plot_inference_comparison(subset_id=sub, num_samples=1, pSize=patch_size, taxonomy=3)
+    for sub in sub_list:
+        for i in range (0, num_iter):
+            plot_inference_comparison(subset_id=sub, num_samples=1, pSize=patch_size, taxonomy=3)
 """
 
-
+            
 if __name__ == "__main__":
     sub_list = [1, 2, 3, 4]
 
