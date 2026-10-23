@@ -35,21 +35,22 @@ if __name__ == "__main__":
     test_samples_per_class=100
     
     # New Tuple Structure: (all_classes, minority_classes)
-    """
     subsets = {
         1: ([8, 11, 23, 56], [56]),
         2: ([13, 30, 38, 53, 61], [13, 53, 61]),
         3: ([1, 2, 10, 17], [1, 10, 17]),
         4: ([29, 50, 64, 76], [64, 76])
     }
-    """
+    
 
+    """
     subsets = {
         1: ([8, 11, 23], []),
         2: ([30, 38], []),
         3: ([1, 2, 10], []),
         4: ([29, 50], []),
     }
+    """
     
     # Initialize the dataset loader
     print("Initializing H2Crop Loader...")
