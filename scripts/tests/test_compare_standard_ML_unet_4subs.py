@@ -23,7 +23,7 @@ from H2Crop.data_structures import h2crop_taxonomy_dict
 patch_size = 64
 dataset_base = "../../ds"
 ml_checkpoints_base = "/media/michele/T7/checkpoints/checkpoints_7_standard_ML_tiles_4_subs_no_hyp_pSize_64_random_split"
-unet_checkpoints_base = "/media/michele/T7/checkpoints/checkpoints_8_unet_pSize_64_balanced_split"
+unet_checkpoints_base = "/media/michele/T7/checkpoints/checkpoints_8_unet_pSize_64_balanced_split_full_aug"
 img_out_dir = "../../img"
 
 

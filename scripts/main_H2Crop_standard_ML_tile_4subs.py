@@ -21,7 +21,7 @@ if __name__ == "__main__":
     modalities = ["hyperspectral", "multispectral"]
     taxonomy = 3
     patch_sizes = [64]
-    save_results_dir = "../results_6"
+    save_results_dir = "../results_8"
     use_gpu = True
 
     valid_threshold = 0.05
@@ -34,11 +34,21 @@ if __name__ == "__main__":
     val_samples_per_class=25000
     test_samples_per_class=100
     
+    # New Tuple Structure: (all_classes, minority_classes)
+    """
     subsets = {
-        1: [8, 11, 23, 56],
-        2: [13, 30, 38, 53, 61],
-        3: [1, 2, 10, 17],
-        4: [29, 50, 64, 76]
+        1: ([8, 11, 23, 56], [56]),
+        2: ([13, 30, 38, 53, 61], [13, 53, 61]),
+        3: ([1, 2, 10, 17], [1, 10, 17]),
+        4: ([29, 50, 64, 76], [64, 76])
+    }
+    """
+
+    subsets = {
+        1: ([8, 11, 23], []),
+        2: ([30, 38], []),
+        3: ([1, 2, 10], []),
+        4: ([29, 50], []),
     }
     
     # Initialize the dataset loader
@@ -51,14 +61,14 @@ if __name__ == "__main__":
     extract_4_subs_tiles(patch_sizes, subsets, modalities, loader, taxonomy, valid_threshold)
 
     
-
     # ==========================================
     # 2. TRAINING PHASE (ML Baselines)
     # ==========================================
     print("\n--- Starting Training Phase (Standard ML Segmentations) ---")
     
     for patch_size in patch_sizes:
-        for subset_id in subsets.keys():
+        # unpack the tuple
+        for subset_id, (subset_classes, minority_classes) in subsets.items():
             save_base_dir = f"../ds/H2Crop_tiles_ds_subset_{subset_id}"
             
             for mod in modalities:
@@ -87,6 +97,7 @@ if __name__ == "__main__":
                             save_results_dir=save_results_dir,
                             dataset_dir=dataset_dir,
                             subset_id=subset_id,
+                            subset_classes=subset_classes, # EXPLICITLY PASS THE TARGET CLASSES
                             modality=mod,
                             taxonomy=taxonomy,
                             patch_size=patch_size,

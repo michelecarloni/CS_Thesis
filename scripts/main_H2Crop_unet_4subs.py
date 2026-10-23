@@ -34,14 +34,23 @@ if __name__ == "__main__":
     batch_size = 32         # Optimized batch size for 64x64 tiles
     encoder_depth = 4       # Matched with 64x64 tiles and ResNet-18
     debug = False
-    train_aug_mode = "minority_class_aug"
+    train_aug_mode = "random_aug"
     
     # DICTIONARY: (all_classes, minority_classes)
+    """
     subsets = {
         1: ([8, 11, 23, 56], [56]),
         2: ([13, 30, 38, 53, 61], [13, 53, 61]),
         3: ([1, 2, 10, 17], [1, 10, 17]),
         4: ([29, 50, 64, 76], [64, 76])
+    }
+    """
+
+    subsets = {
+        1: ([8, 11, 23], []),
+        2: ([30, 38], []),
+        3: ([1, 2, 10], []),
+        4: ([29, 50], []),
     }
     
     print("Initializing H2Crop Loader...")
@@ -51,7 +60,6 @@ if __name__ == "__main__":
     # 1. SUBSET EXTRACTION PHASE
     # ==========================================
     extract_4_subs_tiles(patch_sizes, subsets, modalities, loader, taxonomy, valid_threshold)
-
 
     # ==========================================
     # 2. TRAINING PHASE (Deep Learning U-Net)

@@ -129,6 +129,7 @@ def pipeline_H2Crop_standard_ML_algo_tiles(
     save_results_dir, 
     dataset_dir, 
     subset_id, 
+    subset_classes, # <--- NEW PARAMETER
     modality, 
     taxonomy=3, 
     patch_size=32, 
@@ -148,13 +149,8 @@ def pipeline_H2Crop_standard_ML_algo_tiles(
     if debug:
         train_files, test_files = train_files[:10], test_files[:10]
 
-    # Dynamically determine classes by doing a rapid, memory-safe scan of all training labels
-    print("\nScanning training files to determine true global class list...")
-    global_classes = set()
-    for f in train_files:
-        with np.load(f) as data:
-            global_classes.update(np.unique(data['y']))
-    subset_classes = np.array(sorted(list(global_classes)))
+    # Explicitly define classes (Background 0 + Target Crops) instead of scanning the disk
+    subset_classes = np.array([0] + sorted(subset_classes))
     
     taxonomy_key = f'Taxonomy_{taxonomy}'
     current_taxonomy = h2crop_taxonomy_dict.get(taxonomy_key, {}) 
