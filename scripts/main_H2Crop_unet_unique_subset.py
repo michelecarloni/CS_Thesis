@@ -27,7 +27,7 @@ if __name__ == "__main__":
     debug = False
     
     # Unified subset configuration: Dictionary with tuple key (common classes) and list value (minority classes)
-    unique_classes_dict = {(8, 11, 23, 30, 38, 1, 2, 10, 29, 50): []}
+    unique_classes_dict = {(8, 11, 2): [1, 10, 23, 29, 30, 38, 50]}
     
     common_classes = list(list(unique_classes_dict.keys())[0])
     minority_classes = list(unique_classes_dict.values())[0]
@@ -60,6 +60,8 @@ if __name__ == "__main__":
         num_splits=num_splits,
         apply_mild_balance=apply_mild_balance
     )
+
+    sys.exit(0)
 
     # ==========================================
     # 2. TRAINING PHASE (Deep Learning U-Net CV)
