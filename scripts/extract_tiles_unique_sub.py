@@ -4,6 +4,12 @@ def extract_unique_sub_tiles(patch_sizes, unique_classes, modalities, loader, ta
     print("\n--- Starting Unique Subset Extraction Phase ---")
     save_base_dir = "../ds/H2Crop_tiles_unique_subset"
     
+    # Check if the base directory already exists and contains files/folders to skip the entire extraction
+    if os.path.exists(save_base_dir) and len(os.listdir(save_base_dir)) > 0:
+        print(f"[*] The directory '{save_base_dir}' already exists and is not empty.")
+        print("[*] Skipping the entire extraction phase.")
+        return
+        
     for patch_size in patch_sizes:
         print(f"\n{'='*60}")
         print(f"STARTING PROCESSING FOR PATCH SIZE: {patch_size}x{patch_size}")
