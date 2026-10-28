@@ -183,7 +183,8 @@ class H2Crop:
     def extract_unique_subset_splits(self, save_base_dir, subset_classes, modalities=["hyperspectral", "multispectral"], taxonomy=3, patch_size=64, num_splits=3, apply_mild_balance=True, valid_threshold=0.10, max_files=None, max_workers=None):
         """
         Extracts a unified subset across multiple cross-validation splits.
-        Calculates and logs both tile counts and pixel distributions per class.
+        Calculates and logs both tile counts and pixel distributions per class,
+        including a total pixel count check across the entire split.
         """
         import os
         import json
@@ -220,7 +221,7 @@ class H2Crop:
                         if val in pixel_counts:
                             pixel_counts[val] += count
                         else:
-                            pixel_counts[0] += count # Failsafe for rogue pixels
+                            pixel_counts[0] += count # Failsafe for rogue pixels mapping to background
             return len(tiles), pixel_counts
 
         for split_id in range(1, num_splits + 1):
@@ -317,11 +318,14 @@ class H2Crop:
                         with open(shared_balance_path, 'w') as f:
                             json.dump(kept_train_basenames, f, indent=4)
 
-                # 4. Generate Detailed Summary
+                # 4. Generate Detailed Summary with Total Pixel Checks
                 print(f"[*] Compiling pixel statistics for {mod.upper()}...")
                 n_train, train_pixels = count_tiles_and_pixels(train_dir)
                 n_val, val_pixels = count_tiles_and_pixels(val_dir)
                 n_test, test_pixels = count_tiles_and_pixels(test_dir)
+                
+                # Calculate total pixels across the entire split for the sanity check
+                total_pixels = {c: train_pixels[c] + val_pixels[c] + test_pixels[c] for c in [0] + subset_classes}
                 
                 with open(summary_path, "w") as f:
                     f.write(f"--- Split {split_id} Extraction Summary ---\n")
@@ -335,7 +339,12 @@ class H2Crop:
                     f.write(f"Validation Tiles: {n_val}\n")
                     f.write(f"Test Tiles: {n_test}\n\n")
                     
-                    f.write(f"--- PIXEL DISTRIBUTION (TRAIN) ---\n")
+                    f.write(f"--- PIXEL DISTRIBUTION (TOTAL ACROSS SPLIT) ---\n")
+                    f.write("Use this to verify consistency across Split 1, 2, and 3.\n")
+                    for cls, count in total_pixels.items():
+                        f.write(f"Class {cls}: {count}\n")
+                    
+                    f.write(f"\n--- PIXEL DISTRIBUTION (TRAIN) ---\n")
                     for cls, count in train_pixels.items():
                         f.write(f"Class {cls}: {count}\n")
                         
@@ -348,6 +357,7 @@ class H2Crop:
                         f.write(f"Class {cls}: {count}\n")
                     
                 print(f"[*] Detailed summary for {mod.upper()} (Split {split_id}) saved.")
+    
     def extract_and_save_tiles(self, save_base_dir, modality="hyperspectral", taxonomy=3, patch_size=32, max_files=None, min_train_tiles_threshold=20):
         """
         Iterates through the h5_data directory, extracts spatial patches,
