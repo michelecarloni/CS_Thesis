@@ -34,7 +34,7 @@ def pipeline_H2Crop_unet_unique(
     debug=False,
     train_aug_mode="random_aug"
 ):
-    # INPUT VALIDATION: Enforce strict limits on augmentation strategies
+    # INPUT VALIDATION: Enforce strict limits on augmentation strategies for the unified dataset
     valid_modes = ["no_aug", "random_aug"]
     if train_aug_mode not in valid_modes:
         raise ValueError(f"Invalid train_aug_mode '{train_aug_mode}'. For the unique subset, it must be exactly one of: {valid_modes}")
@@ -48,6 +48,7 @@ def pipeline_H2Crop_unet_unique(
     results_out_dir = os.path.join(save_results_dir, modality)
     os.makedirs(results_out_dir, exist_ok=True)
     
+    # Checkpointing Trackers (using ../ to target root-level checkpoints folder)
     checkpoint_dir = os.path.join("..", "checkpoints", "unique_subset", model_name, modality, f"split_{split_id}_pSize_{patch_size}")
     os.makedirs(checkpoint_dir, exist_ok=True)
     
@@ -104,6 +105,7 @@ def pipeline_H2Crop_unet_unique(
     train_epochs = 2 if debug else epochs
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=train_epochs, eta_min=1e-5)
     
+    # Instantiate the loss
     criterion = CombinedLoss(num_classes=num_classes, bg_weight=0.15, gamma=2.0).to(device)
     
     history_train_loss = []
@@ -111,6 +113,7 @@ def pipeline_H2Crop_unet_unique(
     history_val_f1_per_class = {name: [] for name in target_names}
     history_val_macro_f1_crops = []
     
+    # Files for logging per-epoch validation F1 scores per class
     val_f1_csv_path = os.path.join(results_out_dir, f"val_f1_per_epoch_split_{split_id}.csv")
     val_f1_txt_path = os.path.join(results_out_dir, f"val_f1_per_epoch_split_{split_id}.txt")
     
@@ -128,6 +131,7 @@ def pipeline_H2Crop_unet_unique(
     best_model_path = os.path.join(checkpoint_dir, "best_model.pth")
     
     for epoch in range(train_epochs):
+        # Resample common tiles & deterministic augmentations for this epoch based on train_aug_mode
         train_dataset.set_epoch(epoch)
 
         # 1. TRAINING PHASE
@@ -140,16 +144,19 @@ def pipeline_H2Crop_unet_unique(
             batch_X = batch_X.to(device, non_blocking=True)
             batch_y = batch_y.long().to(device, non_blocking=True)
             
+            # Sanitize any isolated NaN/Inf values without dropping the batch
             batch_X = torch.nan_to_num(batch_X, nan=0.0, posinf=0.0, neginf=0.0)
             
             optimizer.zero_grad()
             
+            # Forward Pass (Global per-band normalization happens inside UNet.input_norm)
             outputs = model(batch_X)
             loss = criterion(outputs, batch_y)
             
             if torch.isnan(loss) or torch.isinf(loss):
                 continue
                 
+            # Backward Pass
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
@@ -178,6 +185,7 @@ def pipeline_H2Crop_unet_unique(
                 
                 batch_X = torch.nan_to_num(batch_X, nan=0.0, posinf=0.0, neginf=0.0)
                 
+                # Forward Pass
                 outputs = model(batch_X)
                 loss = criterion(outputs, batch_y)
                 
@@ -185,6 +193,7 @@ def pipeline_H2Crop_unet_unique(
                     running_val_loss += loss.item()
                     valid_val_batches += 1
                 
+                # Calculate predictions for CM
                 _, predicted = torch.max(outputs.data, 1)
                 pred_flat = predicted.view(-1)
                 true_flat = batch_y.view(-1)
@@ -199,6 +208,7 @@ def pipeline_H2Crop_unet_unique(
         avg_val_loss = running_val_loss / max(valid_val_batches, 1)
         history_val_loss.append(avg_val_loss)
         
+        # Calculate Validation F1 for ALL classes and Macro F1 specifically for crops (ignoring Background class 0)
         val_cm_numpy = val_global_cm.cpu().numpy()
         val_macro_f1_crops = 0.0
         epoch_class_f1s = []
@@ -215,13 +225,15 @@ def pipeline_H2Crop_unet_unique(
             epoch_class_f1s.append(f1)
             history_val_f1_per_class[class_name].append(f1)
             
+            # Index > 0 corresponds to target crop classes
             if idx > 0:
                 val_macro_f1_crops += f1
             
-        val_macro_f1_crops /= (num_classes - 1)
+        val_macro_f1_crops /= (num_classes - 1) # Average only over crop classes
         history_val_macro_f1_crops.append(val_macro_f1_crops)
         current_lr = optimizer.param_groups[0]['lr']
         
+        # Append this epoch's per-class F1 scores to CSV and TXT logs
         with open(val_f1_csv_path, mode='a', newline='') as csv_file:
             writer = csv.writer(csv_file)
             writer.writerow([epoch + 1, f"{avg_val_loss:.4f}", f"{val_macro_f1_crops:.4f}"] + [f"{score:.4f}" for score in epoch_class_f1s])
@@ -234,15 +246,18 @@ def pipeline_H2Crop_unet_unique(
         print(f"    Epoch {epoch+1:02d}/{train_epochs} | LR: {current_lr:.2e} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f} | Val Crop mF1: {val_macro_f1_crops:.4f}")
         print(f"      -> Val F1 per class: [{per_class_str}]")
         
+        # CHECKPOINTING: Save best model based on Crop F1-Score
         if val_macro_f1_crops > best_val_macro_f1_crops:
             best_val_macro_f1_crops = val_macro_f1_crops
             print(f"      [*] Crop F1-Score improved! Saving best model.")
             torch.save(model.state_dict(), best_model_path)
         
+        # Save every epoch unconditionally for your records
         epoch_filepath = os.path.join(checkpoint_dir, f"epoch_{epoch+1:02d}.pth")
         torch.save(model.state_dict(), epoch_filepath)
         
     print(f"    Saved {train_epochs} epoch checkpoints to: {checkpoint_dir}")
+    print(f"    Saved per-epoch Validation F1 logs to: {val_f1_txt_path} and {val_f1_csv_path}")
 
     # 3. PLOT LEARNING CURVE & PER-CLASS VALIDATION F1 CURVE
     print("\n--- GENERATING LEARNING CURVES ---")
@@ -259,7 +274,9 @@ def pipeline_H2Crop_unet_unique(
     plt.tight_layout()
     plt.savefig(learning_curve_path, dpi=300)
     plt.close(fig_lc)
+    print(f"    Saved Learning Curve to: {learning_curve_path}")
     
+    # Plot Per-Class Validation F1 Evolution
     fig_f1, ax_f1 = plt.subplots(figsize=(10, 6))
     for class_name, f1_list in history_val_f1_per_class.items():
         ax_f1.plot(range(1, train_epochs + 1), f1_list, label=class_name, marker='o', markersize=4)
@@ -274,9 +291,12 @@ def pipeline_H2Crop_unet_unique(
     plt.tight_layout()
     plt.savefig(val_f1_curve_path, dpi=300)
     plt.close(fig_f1)
+    print(f"    Saved Per-Class Validation F1 Curve to: {val_f1_curve_path}")
 
     # 4. TEST EVALUATION
     print(f"\n--- EVALUATING ON TEST SET ---")
+    
+    # EXPLICITLY LOAD BEST WEIGHTS BEFORE TESTING
     print(f"      [*] Loading best model weights (Val Crop mF1: {best_val_macro_f1_crops:.4f}) for final test...")
     model.load_state_dict(torch.load(best_model_path))
     model.eval()
