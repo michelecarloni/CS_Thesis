@@ -180,11 +180,11 @@ class H2Crop:
         
         return save_file_path
 
-    def extract_unique_subset_splits(self, save_base_dir, subset_classes, modalities=["hyperspectral", "multispectral"], taxonomy=3, patch_size=64, num_splits=3, apply_mild_balance=True, valid_threshold=0.10, max_files=None, max_workers=None):
+
+    def extract_unique_subset_single_split(self, split_base_dir, split_id, subset_classes, modality, taxonomy=3, patch_size=64, apply_mild_balance=True, valid_threshold=0.10, max_files=None, max_workers=None):
         """
-        Extracts a unified subset across multiple cross-validation splits.
-        Calculates and logs both tile counts and pixel distributions per class,
-        including a total pixel count check across the entire split.
+        Extracts a unified subset for a single modality and a specific CV split.
+        Handles shared split generation and cross-modality train balancing sync.
         """
         import os
         import json
@@ -202,13 +202,90 @@ class H2Crop:
         if max_files is not None:
             h5_files = h5_files[:max_files]
 
-        print(f"\n{'='*70}")
-        print(f"STARTING UNIQUE SUBSET CV EXTRACTION ({num_splits} SPLITS)")
-        print(f"Classes: {subset_classes}")
-        print(f"Mild Balance: {apply_mild_balance}")
-        print(f"{'='*70}")
+        os.makedirs(split_base_dir, exist_ok=True)
+        shared_split_path = os.path.join(split_base_dir, "shared_split_mapping.json")
+        shared_balance_path = os.path.join(split_base_dir, f"shared_balanced_train_pSize_{patch_size}.json")
 
-        # Helper function to count tiles and pixels
+        # 1. Create or load the 70/20/10 file-level split using a split-specific seed
+        if os.path.exists(shared_split_path):
+            print(f"[*] Found existing split mapping for Split {split_id}")
+            with open(shared_split_path, 'r') as f:
+                split_mapping = json.load(f)
+        else:
+            print(f"[*] Generating new 70/20/10 split mapping for Split {split_id}")
+            random.seed(42 + split_id)  
+            shuffled_files = sorted([f for f in h5_files])
+            random.shuffle(shuffled_files)
+            
+            n_total = len(shuffled_files)
+            train_end = int(n_total * 0.70)
+            val_end = int(n_total * 0.90)
+            
+            split_mapping = {
+                "train": shuffled_files[:train_end],
+                "validation": shuffled_files[train_end:val_end],
+                "test": shuffled_files[val_end:]
+            }
+            with open(shared_split_path, 'w') as f:
+                json.dump(split_mapping, f, indent=4)
+
+        file_to_split = {}
+        for split_name, filenames in split_mapping.items():
+            for fname in filenames:
+                file_to_split[fname] = split_name
+
+        # 2. Setup directories and start extraction
+        final_save_dir = os.path.join(split_base_dir, f"{modality}_taxonomy_{taxonomy}_pSize_{patch_size}")
+        train_dir = os.path.join(final_save_dir, "train")
+        val_dir = os.path.join(final_save_dir, "validation")
+        test_dir = os.path.join(final_save_dir, "test")
+
+        for d in [train_dir, val_dir, test_dir]:
+            os.makedirs(d, exist_ok=True)
+
+        worker_func = partial(
+            self._process_single_h5_file_shared, 
+            taxonomy=taxonomy, 
+            modality=modality, 
+            patch_size=patch_size, 
+            subset_classes=subset_classes, 
+            train_dir=train_dir,
+            val_dir=val_dir,
+            test_dir=test_dir,
+            file_to_split=file_to_split,
+            valid_threshold=valid_threshold
+        )
+
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+            list(tqdm(
+                executor.map(worker_func, h5_files), 
+                total=len(h5_files), 
+                desc=f"Extracting {modality.upper()} (Split {split_id})"
+            ))
+
+        # 3. Apply Mild Balancing and Cross-Modality Synchronization
+        if apply_mild_balance:
+            if os.path.exists(shared_balance_path):
+                print(f"[*] Syncing {modality} train set to match primary modality balance...")
+                with open(shared_balance_path, 'r') as f:
+                    kept_train_basenames = set(json.load(f))
+                    
+                deleted_sync = 0
+                for f_name in os.listdir(train_dir):
+                    if f_name.endswith('.npz') and f_name not in kept_train_basenames:
+                        os.remove(os.path.join(train_dir, f_name))
+                        deleted_sync += 1
+                print(f"[*] Sync complete. Removed {deleted_sync} tiles.")
+            else:
+                print(f"[*] Applying mild balancing to {modality} train set...")
+                self._mild_balance_train_dir(train_dir, val_dir, subset_classes)
+                
+                # Save the balanced list so the next modality replicates this exact drop
+                kept_train_basenames = [f for f in os.listdir(train_dir) if f.endswith('.npz')]
+                with open(shared_balance_path, 'w') as f:
+                    json.dump(kept_train_basenames, f, indent=4)
+
+        # 4. Generate Detailed Summary with Total Pixel Checks
         def count_tiles_and_pixels(directory):
             pixel_counts = {c: 0 for c in [0] + subset_classes}
             tiles = [f for f in os.listdir(directory) if f.endswith('.npz')]
@@ -221,142 +298,48 @@ class H2Crop:
                         if val in pixel_counts:
                             pixel_counts[val] += count
                         else:
-                            pixel_counts[0] += count # Failsafe for rogue pixels mapping to background
+                            pixel_counts[0] += count
             return len(tiles), pixel_counts
 
-        for split_id in range(1, num_splits + 1):
-            print(f"\n--- PROCESSING SPLIT {split_id}/{num_splits} ---")
+        print(f"[*] Compiling pixel statistics for {modality.upper()}...")
+        n_train, train_pixels = count_tiles_and_pixels(train_dir)
+        n_val, val_pixels = count_tiles_and_pixels(val_dir)
+        n_test, test_pixels = count_tiles_and_pixels(test_dir)
+        
+        total_pixels = {c: train_pixels[c] + val_pixels[c] + test_pixels[c] for c in [0] + subset_classes}
+        
+        summary_path = os.path.join(final_save_dir, "split_summary.txt")
+        with open(summary_path, "w") as f:
+            f.write(f"--- Split {split_id} Extraction Summary ---\n")
+            f.write(f"Modality: {modality}\n")
+            f.write(f"Mild Balance Applied: {apply_mild_balance}\n")
+            f.write(f"Classes: {subset_classes}\n\n")
             
-            # Directory structure: ds/H2Crop_tiles_unique_subset/split_1/
-            split_base_dir = os.path.join(save_base_dir, f"split_{split_id}")
-            os.makedirs(split_base_dir, exist_ok=True)
-
-            shared_split_path = os.path.join(split_base_dir, "shared_split_mapping.json")
-            shared_balance_path = os.path.join(split_base_dir, f"shared_balanced_train_pSize_{patch_size}.json")
-
-            # 1. Create or load the 70/20/10 file-level split using a split-specific seed
-            if os.path.exists(shared_split_path):
-                print(f"[*] Found existing split mapping for Split {split_id}")
-                with open(shared_split_path, 'r') as f:
-                    split_mapping = json.load(f)
-            else:
-                print(f"[*] Generating new 70/20/10 split mapping for Split {split_id}")
-                random.seed(42 + split_id)  
-                shuffled_files = sorted([f for f in h5_files])
-                random.shuffle(shuffled_files)
+            f.write(f"--- TILE DISTRIBUTION ---\n")
+            f.write(f"Total Tiles: {n_train + n_val + n_test}\n")
+            f.write(f"Train Tiles: {n_train}\n")
+            f.write(f"Validation Tiles: {n_val}\n")
+            f.write(f"Test Tiles: {n_test}\n\n")
+            
+            f.write(f"--- PIXEL DISTRIBUTION (TOTAL ACROSS SPLIT) ---\n")
+            f.write("Use this to verify consistency across Split 1, 2, and 3.\n")
+            for cls, count in total_pixels.items():
+                f.write(f"Class {cls}: {count}\n")
+            
+            f.write(f"\n--- PIXEL DISTRIBUTION (TRAIN) ---\n")
+            for cls, count in train_pixels.items():
+                f.write(f"Class {cls}: {count}\n")
                 
-                n_total = len(shuffled_files)
-                train_end = int(n_total * 0.70)
-                val_end = int(n_total * 0.90)
+            f.write(f"\n--- PIXEL DISTRIBUTION (VALIDATION) ---\n")
+            for cls, count in val_pixels.items():
+                f.write(f"Class {cls}: {count}\n")
                 
-                split_mapping = {
-                    "train": shuffled_files[:train_end],
-                    "validation": shuffled_files[train_end:val_end],
-                    "test": shuffled_files[val_end:]
-                }
-                with open(shared_split_path, 'w') as f:
-                    json.dump(split_mapping, f, indent=4)
+            f.write(f"\n--- PIXEL DISTRIBUTION (TEST) ---\n")
+            for cls, count in test_pixels.items():
+                f.write(f"Class {cls}: {count}\n")
+            
+        print(f"[*] Detailed summary for {modality.upper()} (Split {split_id}) saved.")
 
-            file_to_split = {}
-            for split_name, filenames in split_mapping.items():
-                for fname in filenames:
-                    file_to_split[fname] = split_name
-
-            # 2. Extract modalities sequentially to guarantee syncing
-            for mod in modalities:
-                final_save_dir = os.path.join(split_base_dir, f"{mod}_taxonomy_{taxonomy}_pSize_{patch_size}")
-                train_dir = os.path.join(final_save_dir, "train")
-                val_dir = os.path.join(final_save_dir, "validation")
-                test_dir = os.path.join(final_save_dir, "test")
-
-                summary_path = os.path.join(final_save_dir, "split_summary.txt")
-                if os.path.exists(summary_path):
-                    print(f"[*] {mod.upper()} for Split {split_id} already extracted. Skipping.")
-                    continue
-
-                for d in [train_dir, val_dir, test_dir]:
-                    os.makedirs(d, exist_ok=True)
-
-                worker_func = partial(
-                    self._process_single_h5_file_shared, 
-                    taxonomy=taxonomy, 
-                    modality=mod, 
-                    patch_size=patch_size, 
-                    subset_classes=subset_classes, 
-                    train_dir=train_dir,
-                    val_dir=val_dir,
-                    test_dir=test_dir,
-                    file_to_split=file_to_split,
-                    valid_threshold=valid_threshold
-                )
-
-                with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
-                    list(tqdm(
-                        executor.map(worker_func, h5_files), 
-                        total=len(h5_files), 
-                        desc=f"Extracting {mod.upper()} (Split {split_id})"
-                    ))
-
-                # 3. Apply Mild Balancing and Cross-Modality Synchronization
-                if apply_mild_balance:
-                    if os.path.exists(shared_balance_path):
-                        print(f"[*] Syncing {mod} train set to match primary modality balance...")
-                        with open(shared_balance_path, 'r') as f:
-                            kept_train_basenames = set(json.load(f))
-                            
-                        deleted_sync = 0
-                        for f_name in os.listdir(train_dir):
-                            if f_name.endswith('.npz') and f_name not in kept_train_basenames:
-                                os.remove(os.path.join(train_dir, f_name))
-                                deleted_sync += 1
-                        print(f"[*] Sync complete. Removed {deleted_sync} tiles.")
-                    else:
-                        print(f"[*] Applying mild balancing to {mod} train set...")
-                        self._mild_balance_train_dir(train_dir, val_dir, subset_classes)
-                        
-                        kept_train_basenames = [f for f in os.listdir(train_dir) if f.endswith('.npz')]
-                        with open(shared_balance_path, 'w') as f:
-                            json.dump(kept_train_basenames, f, indent=4)
-
-                # 4. Generate Detailed Summary with Total Pixel Checks
-                print(f"[*] Compiling pixel statistics for {mod.upper()}...")
-                n_train, train_pixels = count_tiles_and_pixels(train_dir)
-                n_val, val_pixels = count_tiles_and_pixels(val_dir)
-                n_test, test_pixels = count_tiles_and_pixels(test_dir)
-                
-                # Calculate total pixels across the entire split for the sanity check
-                total_pixels = {c: train_pixels[c] + val_pixels[c] + test_pixels[c] for c in [0] + subset_classes}
-                
-                with open(summary_path, "w") as f:
-                    f.write(f"--- Split {split_id} Extraction Summary ---\n")
-                    f.write(f"Modality: {mod}\n")
-                    f.write(f"Mild Balance Applied: {apply_mild_balance}\n")
-                    f.write(f"Classes: {subset_classes}\n\n")
-                    
-                    f.write(f"--- TILE DISTRIBUTION ---\n")
-                    f.write(f"Total Tiles: {n_train + n_val + n_test}\n")
-                    f.write(f"Train Tiles: {n_train}\n")
-                    f.write(f"Validation Tiles: {n_val}\n")
-                    f.write(f"Test Tiles: {n_test}\n\n")
-                    
-                    f.write(f"--- PIXEL DISTRIBUTION (TOTAL ACROSS SPLIT) ---\n")
-                    f.write("Use this to verify consistency across Split 1, 2, and 3.\n")
-                    for cls, count in total_pixels.items():
-                        f.write(f"Class {cls}: {count}\n")
-                    
-                    f.write(f"\n--- PIXEL DISTRIBUTION (TRAIN) ---\n")
-                    for cls, count in train_pixels.items():
-                        f.write(f"Class {cls}: {count}\n")
-                        
-                    f.write(f"\n--- PIXEL DISTRIBUTION (VALIDATION) ---\n")
-                    for cls, count in val_pixels.items():
-                        f.write(f"Class {cls}: {count}\n")
-                        
-                    f.write(f"\n--- PIXEL DISTRIBUTION (TEST) ---\n")
-                    for cls, count in test_pixels.items():
-                        f.write(f"Class {cls}: {count}\n")
-                    
-                print(f"[*] Detailed summary for {mod.upper()} (Split {split_id}) saved.")
     
     def extract_and_save_tiles(self, save_base_dir, modality="hyperspectral", taxonomy=3, patch_size=32, max_files=None, min_train_tiles_threshold=20):
         """
@@ -446,6 +429,7 @@ class H2Crop:
         # Trigger per-class split, threshold filtering, and organization
         kept_classes = self._split_and_move_tiles(class_to_files, final_save_dir, min_train_tiles_threshold)
         return kept_classes
+
 
     def _split_and_move_tiles(self, class_to_files_map, base_dir, min_train_tiles_threshold):
         """
