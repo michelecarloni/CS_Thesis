@@ -7,6 +7,8 @@ def extract_unique_sub_tiles(patch_sizes, unique_classes, modalities, loader, ta
     for patch_size in patch_sizes:
         print(f"\n{'='*60}")
         print(f"STARTING PROCESSING FOR PATCH SIZE: {patch_size}x{patch_size}")
+        print(f"Classes: {unique_classes}")
+        print(f"Mild Balance: {apply_mild_balance}")
         print(f"{'='*60}")
         
         for split_id in range(1, num_splits + 1):
