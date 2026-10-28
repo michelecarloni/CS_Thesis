@@ -26,18 +26,22 @@ if __name__ == "__main__":
     use_gpu = True
     debug = False
     
-    # Unified subset configuration (Classes common to previous subsets 1, 2, 3, and 4)
-    unique_classes = [8, 11, 23, 30, 38, 1, 2, 10, 29, 50]
+    # Unified subset configuration: Dictionary with tuple key (common classes) and list value (minority classes)
+    unique_classes_dict = {(8, 11, 23, 30, 38, 1, 2, 10, 29, 50): []}
+    
+    common_classes = list(list(unique_classes_dict.keys())[0])
+    minority_classes = list(unique_classes_dict.values())[0]
+    all_subset_classes = common_classes + minority_classes
     
     # Cross Validation Settings
     num_splits = 3
-    apply_mild_balance = True # Toggle to False for completely random train set extraction
+    apply_mild_balance = True
     
     # U-Net Training parameters
     final_epochs = 100
     batch_size = 32
     encoder_depth = 4
-    train_aug_mode = "random_aug" # Must be "random_aug" or "no_aug" for this pipeline
+    train_aug_mode = "minority_class_aug" 
     
     print("Initializing H2Crop Loader...")
     loader = H2Crop()
@@ -45,9 +49,10 @@ if __name__ == "__main__":
     # ==========================================
     # 1. UNIQUE SUBSET EXTRACTION PHASE
     # ==========================================
+    # The extraction phase requires the complete list of target classes
     extract_unique_sub_tiles(
         patch_sizes=patch_sizes, 
-        unique_classes=unique_classes, 
+        unique_classes=all_subset_classes, 
         modalities=modalities, 
         loader=loader, 
         taxonomy=taxonomy, 
@@ -61,14 +66,12 @@ if __name__ == "__main__":
     # ==========================================
     print("\n--- Starting Deep Learning Phase (CV across Splits) ---")
     
-    # Use ../ to step out of the scripts folder
     save_base_dir = "../ds/H2Crop_tiles_unique_subset"
     
     for encoder in encoders:
         for patch_size in patch_sizes:
             
             for split_id in range(1, num_splits + 1):
-                # We define the specific results folder for this split and model
                 split_results_dir = os.path.join(save_results_dir, f"split_{split_id}", f"unet_enc_{encoder}_{patch_size}")
                 
                 for mod in modalities:
@@ -80,7 +83,6 @@ if __name__ == "__main__":
                         
                         print(f"\n[*] Preparing {model_name} for {mod.upper()} | SPLIT {split_id}")
                         
-                        # Call the new pipeline
                         pipeline_H2Crop_unet_unique(
                             in_channels=in_channels,
                             encoder_name=encoder,
@@ -88,7 +90,8 @@ if __name__ == "__main__":
                             save_results_dir=split_results_dir,
                             dataset_dir=dataset_dir,
                             split_id=split_id,
-                            subset_classes=unique_classes,
+                            subset_classes=all_subset_classes,
+                            minority_classes=minority_classes,
                             modality=mod,
                             taxonomy=taxonomy,
                             patch_size=patch_size,
