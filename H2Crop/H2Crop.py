@@ -181,27 +181,20 @@ class H2Crop:
         return save_file_path
 
 
-    def extract_global_subset_and_split(self, save_base_dir, subset_classes, modalities, taxonomy=3, patch_size=64, num_splits=3, apply_mild_balance=True, valid_threshold=0.10, max_files=None, max_workers=None):
+    def extract_unique_subset_and_split(self, save_base_dir, subset_classes, modalities, taxonomy=3, patch_size=64, num_splits=3, apply_mild_balance=True, valid_threshold=0.10, max_files=None, max_workers=None):
         """
-        Creates a 'Golden Dataset' pool of tiles (globally mild-balanced if requested),
-        syncs it across modalities, and then performs a strict tile-level cross-validation 
-        split so every fold uses the exact same global pool of tiles.
+        Uses Split 1 as the anchor to establish a balanced master pool of tiles. 
+        Subsequent splits use new .h5 parent routing (to prevent data leakage) 
+        but filter their extracted tiles strictly against Split 1's master pool.
+        Logs exhaustive pixel and tile counts for thesis documentation.
         """
         import os
         import json
-        import shutil
         import numpy as np
         from tqdm import tqdm
         import concurrent.futures
         from functools import partial
-        import h5py
-        from scipy.stats import mode
-        from sklearn.model_selection import KFold
 
-        # Setup Golden Pool Directories
-        golden_dir = os.path.join(save_base_dir, "golden_pool")
-        os.makedirs(golden_dir, exist_ok=True)
-        
         h5_files = [f for f in os.listdir(self.h5_dir) if f.endswith('.h5')]
         if not h5_files:
             print(f"[Warning] No .h5 files found in {self.h5_dir}")
@@ -210,35 +203,91 @@ class H2Crop:
         if max_files is not None:
             h5_files = h5_files[:max_files]
 
-        # Ensure hyperspectral is processed first to drive the balancing
+        # Ensure hyperspectral is processed first to drive the balancing sync
         if modalities[0] != "hyperspectral" and "hyperspectral" in modalities:
             modalities.remove("hyperspectral")
             modalities.insert(0, "hyperspectral")
 
-        shared_balance_path = os.path.join(golden_dir, f"golden_balanced_tiles_pSize_{patch_size}.json")
+        # The master list defining the exact global pool of tiles allowed in all splits
+        master_tiles_path = os.path.join(save_base_dir, f"master_valid_tiles_pSize_{patch_size}.json")
 
-        for mod in modalities:
-            mod_golden_dir = os.path.join(golden_dir, f"{mod}_taxonomy_{taxonomy}_pSize_{patch_size}")
+        def count_tiles_and_pixels(directory):
+            """Helper to extract exact tile count and pixel distribution for a directory."""
+            pixel_counts = {c: 0 for c in [0] + subset_classes}
+            tiles = [f for f in os.listdir(directory) if f.endswith('.npz')]
             
-            if os.path.exists(mod_golden_dir) and len(os.listdir(mod_golden_dir)) > 0:
-                print(f"[*] Golden pool for {mod.upper()} already extracted. Skipping.")
+            for f_name in tqdm(tiles, desc=f"Scanning pixels in {os.path.basename(directory)}", leave=False):
+                with np.load(os.path.join(directory, f_name)) as data:
+                    y = data['y']
+                    unique, counts = np.unique(y, return_counts=True)
+                    for val, count in zip(unique, counts):
+                        if val in pixel_counts:
+                            pixel_counts[val] += count
+                        else:
+                            pixel_counts[0] += count
+            return len(tiles), pixel_counts
+
+        for split_id in range(1, num_splits + 1):
+            print(f"\n{'='*60}")
+            print(f"PROCESSING SPLIT {split_id}/{num_splits} (Anchor Method)")
+            print(f"{'='*60}")
+            
+            split_base_dir = os.path.join(save_base_dir, f"split_{split_id}")
+            os.makedirs(split_base_dir, exist_ok=True)
+            
+            shared_split_path = os.path.join(split_base_dir, "shared_split_mapping.json")
+            shared_balance_path = os.path.join(split_base_dir, f"shared_balanced_train_pSize_{patch_size}.json")
+
+            # 1. Parent-level .h5 splitting (Geographic Isolation)
+            if os.path.exists(shared_split_path):
+                print(f"[*] Found existing split mapping for Split {split_id}")
+                with open(shared_split_path, 'r') as f:
+                    split_mapping = json.load(f)
             else:
-                os.makedirs(mod_golden_dir, exist_ok=True)
+                print(f"[*] Generating new 70/20/10 parent split mapping for Split {split_id}")
+                import random
+                random.seed(42 + split_id)  
+                shuffled_files = sorted([f for f in h5_files])
+                random.shuffle(shuffled_files)
                 
-                # We reuse the shared extraction logic, but without routing to train/val/test yet.
-                # We map all valid files to "golden" and pass the mod_golden_dir as the target.
-                dummy_file_to_split = {f: "golden" for f in h5_files}
+                n_total = len(shuffled_files)
+                train_end = int(n_total * 0.70)
+                val_end = int(n_total * 0.90)
                 
+                split_mapping = {
+                    "train": shuffled_files[:train_end],
+                    "validation": shuffled_files[train_end:val_end],
+                    "test": shuffled_files[val_end:]
+                }
+                with open(shared_split_path, 'w') as f:
+                    json.dump(split_mapping, f, indent=4)
+
+            file_to_split = {fname: s_name for s_name, fnames in split_mapping.items() for fname in fnames}
+
+            # 2. Extract and Balance/Filter
+            for mod in modalities:
+                final_save_dir = os.path.join(split_base_dir, f"{mod}_taxonomy_{taxonomy}_pSize_{patch_size}")
+                train_dir = os.path.join(final_save_dir, "train")
+                val_dir = os.path.join(final_save_dir, "validation")
+                test_dir = os.path.join(final_save_dir, "test")
+
+                if os.path.exists(os.path.join(final_save_dir, "split_summary.txt")):
+                    print(f"[*] {mod.upper()} for Split {split_id} already completed. Skipping.")
+                    continue
+
+                for d in [train_dir, val_dir, test_dir]:
+                    os.makedirs(d, exist_ok=True)
+
                 worker_func = partial(
                     self._process_single_h5_file_shared, 
                     taxonomy=taxonomy, 
                     modality=mod, 
                     patch_size=patch_size, 
                     subset_classes=subset_classes, 
-                    train_dir=mod_golden_dir, # All routed here
-                    val_dir=mod_golden_dir,
-                    test_dir=mod_golden_dir,
-                    file_to_split=dummy_file_to_split,
+                    train_dir=train_dir,
+                    val_dir=val_dir,
+                    test_dir=test_dir,
+                    file_to_split=file_to_split,
                     valid_threshold=valid_threshold
                 )
 
@@ -246,120 +295,91 @@ class H2Crop:
                     list(tqdm(
                         executor.map(worker_func, h5_files), 
                         total=len(h5_files), 
-                        desc=f"Extracting Global Pool ({mod.upper()})"
+                        desc=f"Extracting {mod.upper()} (Split {split_id})"
                     ))
-                    
-                # 2. Global Mild Balancing & Modality Syncing
-                if apply_mild_balance:
-                    if os.path.exists(shared_balance_path):
-                        print(f"[*] Syncing {mod.upper()} golden pool to primary modality balance...")
-                        with open(shared_balance_path, 'r') as f:
-                            kept_basenames = set(json.load(f))
+
+                if split_id == 1:
+                    # Anchor Split Logic: Perform dynamic balancing and establish the Master Pool
+                    if apply_mild_balance:
+                        if os.path.exists(shared_balance_path):
+                            print(f"[*] Syncing {mod.upper()} Train set to primary modality balance...")
+                            with open(shared_balance_path, 'r') as f:
+                                kept_train_basenames = set(json.load(f))
+                                
+                            for f_name in os.listdir(train_dir):
+                                if f_name.endswith('.npz') and f_name not in kept_train_basenames:
+                                    os.remove(os.path.join(train_dir, f_name))
+                        else:
+                            print(f"[*] Applying Mild Balancing to {mod.upper()} Train set (Anchor)...")
+                            self._mild_balance_train_dir(train_dir, val_dir, subset_classes)
                             
-                        deleted_sync = 0
-                        for f_name in os.listdir(mod_golden_dir):
-                            if f_name.endswith('.npz') and f_name not in kept_basenames:
-                                os.remove(os.path.join(mod_golden_dir, f_name))
-                                deleted_sync += 1
-                        print(f"[*] Sync complete. Removed {deleted_sync} tiles.")
-                    else:
-                        print(f"[*] Applying Global Mild Balancing to {mod.upper()} pool...")
-                        self._mild_balance_golden_pool(mod_golden_dir, subset_classes)
+                            kept_train_basenames = [f for f in os.listdir(train_dir) if f.endswith('.npz')]
+                            with open(shared_balance_path, 'w') as f:
+                                json.dump(kept_train_basenames, f, indent=4)
+                                
+                    # Once the anchor split is fully processed (Hyperspectral & Multispectral), build the Master List
+                    if not os.path.exists(master_tiles_path):
+                        print(f"[*] Generating Master Survivor List from Anchor Split (Split 1)...")
+                        master_list = []
+                        for d in [train_dir, val_dir, test_dir]:
+                            master_list.extend([f for f in os.listdir(d) if f.endswith('.npz')])
                         
-                        # Save the balanced list so subsequent modalities replicate this exact drop
-                        kept_basenames = [f for f in os.listdir(mod_golden_dir) if f.endswith('.npz')]
-                        with open(shared_balance_path, 'w') as f:
-                            json.dump(kept_basenames, f, indent=4)
-
-        # 3. Cross-Validation Tile-Level Routing
-        print("\n--- Initiating Strict Tile-Level Cross-Validation Routing ---")
-        
-        with open(shared_balance_path, 'r') as f:
-            golden_tiles = np.array(json.load(f))
-            
-        kf = KFold(n_splits=num_splits, shuffle=True, random_state=42)
-        splits = list(kf.split(golden_tiles))
-        
-        for split_id, (train_val_idx, test_idx) in enumerate(splits, 1):
-            split_base = os.path.join(save_base_dir, f"split_{split_id}")
-            
-            # Further split train_val into train (80% of remaining) and val (20% of remaining)
-            from sklearn.model_selection import train_test_split
-            train_idx, val_idx = train_test_split(train_val_idx, test_size=0.20, random_state=42 + split_id)
-            
-            split_map = {
-                "train": set(golden_tiles[train_idx]),
-                "validation": set(golden_tiles[val_idx]),
-                "test": set(golden_tiles[test_idx])
-            }
-            
-            for mod in modalities:
-                mod_golden_dir = os.path.join(golden_dir, f"{mod}_taxonomy_{taxonomy}_pSize_{patch_size}")
-                final_save_dir = os.path.join(split_base, f"{mod}_taxonomy_{taxonomy}_pSize_{patch_size}")
+                        with open(master_tiles_path, 'w') as f:
+                            json.dump(list(set(master_list)), f, indent=4)
                 
-                if os.path.exists(os.path.join(final_save_dir, "split_summary.txt")):
-                    continue
+                else:
+                    # Reshuffled Splits Logic (Splits 2 & 3): Filter strictly against the Anchor's Master List
+                    print(f"[*] Filtering {mod.upper()} Split {split_id} against Anchor Master List...")
+                    with open(master_tiles_path, 'r') as f:
+                        master_set = set(json.load(f))
+                        
+                    deleted = 0
+                    for d in [train_dir, val_dir, test_dir]:
+                        for f_name in os.listdir(d):
+                            if f_name.endswith('.npz') and f_name not in master_set:
+                                os.remove(os.path.join(d, f_name))
+                                deleted += 1
+                    print(f"[*] Filter complete. Removed {deleted} tiles to match the global pool.")
+
+                # Generate Exact Pixel & Tile Summary for Thesis Logging
+                print(f"[*] Compiling strict statistics for {mod.upper()} Split {split_id}...")
+                n_train, train_pixels = count_tiles_and_pixels(train_dir)
+                n_val, val_pixels = count_tiles_and_pixels(val_dir)
+                n_test, test_pixels = count_tiles_and_pixels(test_dir)
+                
+                total_tiles = n_train + n_val + n_test
+                total_pixels = {c: train_pixels[c] + val_pixels[c] + test_pixels[c] for c in [0] + subset_classes}
+                
+                summary_path = os.path.join(final_save_dir, "split_summary.txt")
+                with open(summary_path, "w") as f:
+                    f.write(f"--- Anchor-Filtered Split {split_id} Summary ---\n")
+                    f.write(f"Modality: {mod}\n")
+                    f.write(f"Classes: {subset_classes}\n\n")
                     
-                print(f"[*] Populating {mod.upper()} Split {split_id}...")
-                
-                for subset_name in ["train", "validation", "test"]:
-                    target_dir = os.path.join(final_save_dir, subset_name)
-                    os.makedirs(target_dir, exist_ok=True)
+                    f.write(f"--- TILE DISTRIBUTION ---\n")
+                    f.write(f"Total Tiles in Split: {total_tiles}\n")
+                    f.write(f"Train Tiles: {n_train}\n")
+                    f.write(f"Validation Tiles: {n_val}\n")
+                    f.write(f"Test Tiles: {n_test}\n\n")
                     
-                    # Copy files into place (symlinks can break depending on OS/File System)
-                    for tile_name in split_map[subset_name]:
-                        src = os.path.join(mod_golden_dir, tile_name)
-                        dst = os.path.join(target_dir, tile_name)
-                        shutil.copy2(src, dst)
+                    f.write(f"--- PIXEL DISTRIBUTION (TOTAL ACROSS SPLIT) ---\n")
+                    f.write("Use this to verify exact pool consistency across all splits.\n")
+                    for cls, count in total_pixels.items():
+                        f.write(f"Class {cls}: {count}\n")
+                    
+                    f.write(f"\n--- PIXEL DISTRIBUTION (TRAIN) ---\n")
+                    for cls, count in train_pixels.items():
+                        f.write(f"Class {cls}: {count}\n")
                         
-                # Summary logic...
-                with open(os.path.join(final_save_dir, "split_summary.txt"), "w") as f:
-                    f.write(f"--- Golden Pool CV Summary (Split {split_id}) ---\n")
-                    f.write(f"Total Tiles: {len(golden_tiles)}\n")
-                    f.write(f"Train Tiles: {len(train_idx)}\n")
-                    f.write(f"Validation Tiles: {len(val_idx)}\n")
-                    f.write(f"Test Tiles: {len(test_idx)}\n")
-
-
-    def _mild_balance_golden_pool(self, golden_dir, subset_classes):
-        """
-        Balances the entire global pool.
-        """
-        import os
-        import numpy as np
-        import random
-        from scipy.stats import mode
-        from tqdm import tqdm
-        
-        class_to_files = {c: [] for c in subset_classes}
-        files = [os.path.join(golden_dir, f) for f in os.listdir(golden_dir) if f.endswith('.npz')]
-        
-        for fpath in tqdm(files, desc="Scanning Global Pool"):
-            with np.load(fpath) as data:
-                y = data['y']
-                crop_pixels = y[np.isin(y, subset_classes)]
-                if len(crop_pixels) > 0:
-                    predominant = int(mode(crop_pixels, keepdims=False)[0])
-                    if predominant in class_to_files:
-                        class_to_files[predominant].append(fpath)
+                    f.write(f"\n--- PIXEL DISTRIBUTION (VALIDATION) ---\n")
+                    for cls, count in val_pixels.items():
+                        f.write(f"Class {cls}: {count}\n")
                         
-        counts = {c: len(class_to_files[c]) for c in subset_classes}
-        valid_counts = [c for c in counts.values() if c > 0]
-        mean_count = int(np.mean(valid_counts)) if valid_counts else 0
-        
-        deleted = 0
-        random.seed(42)
-        
-        for c in subset_classes:
-            if counts[c] > mean_count:
-                drop_count = counts[c] - mean_count
-                random.shuffle(class_to_files[c])
-                
-                for fpath in class_to_files[c][:drop_count]:
-                    os.remove(fpath)
-                deleted += drop_count
-                
-        print(f"Global balance applied. Capped at {mean_count}. Removed {deleted} tiles.")
+                    f.write(f"\n--- PIXEL DISTRIBUTION (TEST) ---\n")
+                    for cls, count in test_pixels.items():
+                        f.write(f"Class {cls}: {count}\n")
+                    
+                print(f"[*] Detailed summary for {mod.upper()} (Split {split_id}) saved.")
 
     
     def extract_and_save_tiles(self, save_base_dir, modality="hyperspectral", taxonomy=3, patch_size=32, max_files=None, min_train_tiles_threshold=20):

@@ -13,7 +13,7 @@ def extract_unique_sub_tiles(patch_sizes, unique_classes, modalities, loader, ta
         
         # We now use a unified extraction method that builds the golden dataset 
         # and distributes it across the splits in one go.
-        loader.extract_global_subset_and_split(
+        loader.extract_unique_subset_and_split(
             save_base_dir=save_base_dir,
             subset_classes=unique_classes,
             modalities=modalities,
