@@ -339,7 +339,14 @@ def pipeline_H2Crop_unet_unique(
     with open(os.path.join(results_out_dir, f"performance_split_{split_id}.txt"), "w") as f:
         f.write(f"--- Deep Learning Standard Inference ({model_name}) ---\n\n" + "\n".join(report_lines))
         
+    # Normalize by row (True labels) to show proportional accuracy
+    cm_normalized = cm_numpy.astype('float') / cm_numpy.sum(axis=1)[:, np.newaxis]
+    cm_normalized = np.nan_to_num(cm_normalized) # Safely handle any zero-division
+
     fig, ax = plt.subplots(figsize=(10, 8))
+    # Pass the normalized matrix to the display
+    ConfusionMatrixDisplay(confusion_matrix=cm_normalized, display_labels=target_names).plot(ax=ax, cmap='Blues', colorbar=False, values_format='.2f')
+    
     ConfusionMatrixDisplay(confusion_matrix=cm_numpy, display_labels=target_names).plot(ax=ax, cmap='Blues', colorbar=False)
     plt.title(f"Confusion Matrix: {model_name}\n({modality} | Split {split_id} | pSize {patch_size})")
     plt.xticks(rotation=45, ha='right', fontsize=9)

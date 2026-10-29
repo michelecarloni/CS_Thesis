@@ -38,7 +38,7 @@ if __name__ == "__main__":
     apply_mild_balance = True
     
     # U-Net Training parameters
-    final_epochs = 100
+    final_epochs = 80
     batch_size = 32
     encoder_depth = 4
     train_aug_mode = "minority_class_aug" 
@@ -61,7 +61,6 @@ if __name__ == "__main__":
         apply_mild_balance=apply_mild_balance
     )
 
-    sys.exit(0)
 
     # ==========================================
     # 2. TRAINING PHASE (Deep Learning U-Net CV)
