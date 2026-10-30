@@ -29,28 +29,40 @@ unet_checkpoints_base = "/media/michele/T7/checkpoints/checkpoints_9_unet_pSize6
 img_out_dir = "../../img_comp_unique_subset"
 
 
-def find_best_model(base_dir, split_id, modality):
+def find_unet_model(base_dir, split_id, modality, use_best_model=True):
     """
-    Recursively searches the base_dir to find the 'best_model.pth' 
-    that matches the given split_id and modality for the U-Net.
+    Recursively searches the base_dir to find the U-Net model 
+    that matches the given split_id and modality.
+    If use_best_model is True, searches for 'best_model.pth'.
+    If False, searches for files matching 'epoch_*.pth'.
     """
-    search_pattern = os.path.join(base_dir, '**', 'best_model.pth')
+    if use_best_model:
+        search_pattern = os.path.join(base_dir, '**', 'best_model.pth')
+    else:
+        search_pattern = os.path.join(base_dir, '**', 'epoch_*.pth')
+        
     all_models = glob.glob(search_pattern, recursive=True)
     
-    for model_path in all_models:
+    # If looking for epoch files and multiple exist, sort them to grab the latest one
+    if not use_best_model:
+        all_models = sorted(all_models)
+    
+    for model_path in reversed(all_models): # reversed ensures we get the latest epoch if multiple match
         if modality in model_path and f"split_{split_id}" in model_path:
             return model_path
             
     return None
 
 
-def plot_inference_comparison(split_id, num_samples, pSize, taxonomy=3, unet_encoders=["resnet18"]):
+def plot_inference_comparison(split_id, num_samples, pSize, taxonomy=3, unet_encoders=["resnet18"], use_best_model=True):
     """
     Generates comparative plots combining Hyperspectral and Multispectral rows in the SAME image.
     Processes strictly 1 sample at a time with aggressive memory clearing.
+    Allows toggling between the best validation model and the final epoch model to counter overfitting.
     """
     print(f"\n{'='*70}")
-    print(f"GENERATING COMBINED INFERENCE PLOTS | Unique Subset - Split {split_id} | pSize {pSize}")
+    model_type_str = "BEST MODEL" if use_best_model else "FINAL EPOCH"
+    print(f"GENERATING COMBINED INFERENCE PLOTS | Unique Subset - Split {split_id} | pSize {pSize} | {model_type_str}")
     print(f"{'='*70}")
 
     # CONFIGURATION & PATHS
@@ -132,8 +144,9 @@ def plot_inference_comparison(split_id, num_samples, pSize, taxonomy=3, unet_enc
                 
         # Deep Learning U-Net
         for encoder in unet_encoders:
-            checkpoint_path = find_best_model(unet_checkpoints_base, split_id, mod)
+            checkpoint_path = find_unet_model(unet_checkpoints_base, split_id, mod, use_best_model)
             if checkpoint_path and os.path.exists(checkpoint_path):
+                print(f"    -> Loading U-Net weights from: {os.path.basename(checkpoint_path)}")
                 state_dict = torch.load(checkpoint_path, map_location=device, weights_only=True)
                 
                 block_indices = []
@@ -250,7 +263,8 @@ def plot_inference_comparison(split_id, num_samples, pSize, taxonomy=3, unet_enc
                    bbox_to_anchor=(0.5, 0.02), fontsize=14, frameon=False)
         
         random_id = uuid.uuid4().hex[:8]
-        out_file = os.path.join(img_out_dir, f"inference_unique_split_{split_id}_combined_sample_{idx+1}_{random_id}.png")
+        type_str = "best" if use_best_model else "epoch"
+        out_file = os.path.join(img_out_dir, f"inference_unique_split_{split_id}_{type_str}_sample_{idx+1}_{random_id}.png")
         
         plt.savefig(out_file, dpi=300, bbox_inches='tight', facecolor='white')
         
@@ -273,4 +287,10 @@ if __name__ == "__main__":
  
     for split in split_list:
         for i in range(0, num_iter):
-            plot_inference_comparison(split_id=split, num_samples=1, pSize=patch_size, taxonomy=3)
+            plot_inference_comparison(
+                split_id=split, 
+                num_samples=1, 
+                pSize=patch_size, 
+                taxonomy=3,
+                use_best_model=True
+            )
