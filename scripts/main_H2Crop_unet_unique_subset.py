@@ -23,7 +23,7 @@ if __name__ == "__main__":
     save_results_dir = "../results_9"
     
     # NEW: Define the path to the pre-computed .joblib scalers
-    scalers_dir = "/media/michele/T7/scalers"
+    scalers_dir = "/media/michele/T7/scalers/scalers_unique_subset"
     
     encoders = ["resnet18"]
     use_gpu = True

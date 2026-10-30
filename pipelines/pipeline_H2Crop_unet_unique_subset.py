@@ -21,7 +21,7 @@ def pipeline_H2Crop_unet_unique(
     model_name,
     save_results_dir, 
     dataset_dir, 
-    scalers_dir,  # NEW: Accepts the scalers directory
+    scalers_dir, 
     split_id, 
     subset_classes,
     minority_classes,
@@ -60,7 +60,7 @@ def pipeline_H2Crop_unet_unique(
     # PHASE 1: LOAD PRE-COMPUTED SCALER
     # ==========================================
     # Construct the path based on the external out-of-core preprocessing script
-    scaler_path = os.path.join(scalers_dir, modality, f"scaler_split_{split_id}_tax_{taxonomy}_pSize_{patch_size}.joblib")
+    scaler_path = os.path.join(scalers_dir, "unique_subset", modality, f"scaler_split_{split_id}_tax_{taxonomy}_pSize_{patch_size}.joblib")
     
     if not os.path.exists(scaler_path):
         raise FileNotFoundError(f"Scaler missing at: {scaler_path}. Please run the preprocessing scaler script first.")
