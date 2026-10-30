@@ -22,13 +22,15 @@ if __name__ == "__main__":
     valid_threshold = 0.10  
     save_results_dir = "../results_9"
     
+    # NEW: Define the path to the pre-computed .joblib scalers
+    scalers_dir = "/media/michele/T7/scalers"
+    
     encoders = ["resnet18"]
     use_gpu = True
     debug = False
     
     # Unified subset configuration: Dictionary with tuple key (common classes) and list value (minority classes)
     unique_classes_dict = {(8, 11, 2, 1, 10, 23, 29, 30, 38, 50): []}
-    # unique_classes_dict = {(8, 11, 2): [1, 10, 23, 29, 30, 38, 50]}
     
     common_classes = list(list(unique_classes_dict.keys())[0])
     minority_classes = list(unique_classes_dict.values())[0]
@@ -50,7 +52,6 @@ if __name__ == "__main__":
     # ==========================================
     # 1. UNIQUE SUBSET EXTRACTION PHASE
     # ==========================================
-    # The extraction phase requires the complete list of target classes
     extract_unique_sub_tiles(
         patch_sizes=patch_sizes, 
         unique_classes=all_subset_classes, 
@@ -61,7 +62,6 @@ if __name__ == "__main__":
         num_splits=num_splits,
         apply_mild_balance=apply_mild_balance
     )
-
 
     # ==========================================
     # 2. TRAINING PHASE (Deep Learning U-Net CV)
@@ -91,6 +91,7 @@ if __name__ == "__main__":
                             model_name=model_name,
                             save_results_dir=split_results_dir,
                             dataset_dir=dataset_dir,
+                            scalers_dir=scalers_dir,  # NEW: Pass the scalers directory to the pipeline
                             split_id=split_id,
                             subset_classes=all_subset_classes,
                             minority_classes=minority_classes,

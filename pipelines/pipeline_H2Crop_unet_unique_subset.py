@@ -1,11 +1,9 @@
 import os
 import gc
 import csv
-import glob
 import joblib
 import numpy as np
 import matplotlib.pyplot as plt
-from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import ConfusionMatrixDisplay
 from H2Crop.data_structures import h2crop_taxonomy_dict
 from H2Crop.H2CropTileDataset import H2CropTileDataset
@@ -17,27 +15,13 @@ from tqdm import tqdm
 
 from loss import CombinedLoss
 
-
-def chunked_file_generator(files, chunk_size=500):
-    for i in range(0, len(files), chunk_size):
-        yield files[i:i + chunk_size]
-
-def load_chunk_into_memory(file_chunk, in_channels):
-    X_list = []
-    for f in file_chunk:
-        with np.load(f) as data:
-            # Reshape from (C, H, W) to (Pixels, C) for the StandardScaler
-            X_flat = data['X'].reshape(in_channels, -1).T.astype(np.float32)
-            X_list.append(X_flat)
-    return np.concatenate(X_list)
-
-
 def pipeline_H2Crop_unet_unique(
     in_channels,
     encoder_name,
     model_name,
     save_results_dir, 
     dataset_dir, 
+    scalers_dir,  # NEW: Accepts the scalers directory
     split_id, 
     subset_classes,
     minority_classes,
@@ -73,29 +57,16 @@ def pipeline_H2Crop_unet_unique(
     print(f"Compute Device: {device}")
 
     # ==========================================
-    # PHASE 1: INDEPENDENT U-NET SCALER FITTING
+    # PHASE 1: LOAD PRE-COMPUTED SCALER
     # ==========================================
-    print("\n--- Phase 1: Computing Global StandardScaler ---")
-    train_files = glob.glob(os.path.join(dataset_dir, "train", "*.npz"))
-    if debug:
-        train_files = train_files[:10]
-        
-    scaler = StandardScaler()
+    # Construct the path based on the external out-of-core preprocessing script
+    scaler_path = os.path.join(scalers_dir, modality, f"scaler_split_{split_id}_tax_{taxonomy}_pSize_{patch_size}.joblib")
     
-    # Process files in chunks to prevent CPU OOM errors
-    for chunk in tqdm(list(chunked_file_generator(train_files, chunk_size=500)), desc="Fitting Scaler (Batches)"):
-        X_chunk = load_chunk_into_memory(chunk, in_channels)
+    if not os.path.exists(scaler_path):
+        raise FileNotFoundError(f"Scaler missing at: {scaler_path}. Please run the preprocessing scaler script first.")
         
-        # Neutralize NaNs and Infs before fitting the scaler
-        X_chunk = np.nan_to_num(X_chunk, nan=0.0, posinf=0.0, neginf=0.0)
-        scaler.partial_fit(X_chunk)
-        
-        del X_chunk
-        gc.collect()
-
-    scaler_path = os.path.join(checkpoint_dir, f"scaler_{modality}_split_{split_id}.joblib")
-    joblib.dump(scaler, scaler_path)
-    print(f"    -> Scaler saved to: {scaler_path}")
+    print(f"\n--- Loading Global StandardScaler from Disk ---")
+    scaler = joblib.load(scaler_path)
     
     # Convert Scikit-Learn arrays to GPU tensors and reshape for native PyTorch broadcasting (1, C, 1, 1)
     scaler_mean = torch.tensor(scaler.mean_, dtype=torch.float32, device=device).view(1, in_channels, 1, 1)
@@ -188,7 +159,7 @@ def pipeline_H2Crop_unet_unique(
             batch_X = batch_X.to(device, non_blocking=True)
             batch_y = batch_y.long().to(device, non_blocking=True)
             
-            # NATIVE GPU SCALING
+            # NATIVE GPU SCALING USING PRE-COMPUTED TENSORS
             batch_X = torch.nan_to_num(batch_X, nan=0.0, posinf=0.0, neginf=0.0)
             batch_X = (batch_X - scaler_mean) / scaler_scale
             
