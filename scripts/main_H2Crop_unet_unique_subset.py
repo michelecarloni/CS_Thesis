@@ -27,7 +27,8 @@ if __name__ == "__main__":
     debug = False
     
     # Unified subset configuration: Dictionary with tuple key (common classes) and list value (minority classes)
-    unique_classes_dict = {(8, 11, 2): [1, 10, 23, 29, 30, 38, 50]}
+    unique_classes_dict = {(8, 11, 2, 1, 10, 23, 29, 30, 38, 50): []}
+    # unique_classes_dict = {(8, 11, 2): [1, 10, 23, 29, 30, 38, 50]}
     
     common_classes = list(list(unique_classes_dict.keys())[0])
     minority_classes = list(unique_classes_dict.values())[0]
@@ -41,7 +42,7 @@ if __name__ == "__main__":
     final_epochs = 80
     batch_size = 32
     encoder_depth = 4
-    train_aug_mode = "minority_class_aug" 
+    train_aug_mode = "random_aug" 
     
     print("Initializing H2Crop Loader...")
     loader = H2Crop()

@@ -1,8 +1,11 @@
 import os
 import gc
 import csv
+import glob
+import joblib
 import numpy as np
 import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import ConfusionMatrixDisplay
 from H2Crop.data_structures import h2crop_taxonomy_dict
 from H2Crop.H2CropTileDataset import H2CropTileDataset
@@ -13,6 +16,21 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from loss import CombinedLoss
+
+
+def chunked_file_generator(files, chunk_size=500):
+    for i in range(0, len(files), chunk_size):
+        yield files[i:i + chunk_size]
+
+def load_chunk_into_memory(file_chunk, in_channels):
+    X_list = []
+    for f in file_chunk:
+        with np.load(f) as data:
+            # Reshape from (C, H, W) to (Pixels, C) for the StandardScaler
+            X_flat = data['X'].reshape(in_channels, -1).T.astype(np.float32)
+            X_list.append(X_flat)
+    return np.concatenate(X_list)
+
 
 def pipeline_H2Crop_unet_unique(
     in_channels,
@@ -35,7 +53,6 @@ def pipeline_H2Crop_unet_unique(
     debug=False,
     train_aug_mode="minority_class_aug"
 ):
-    # INPUT VALIDATION: Re-enable full augmentation modes[cite: 10]
     valid_modes = ["no_aug", "random_aug", "full_aug", "minority_class_aug"]
     if train_aug_mode not in valid_modes:
         raise ValueError(f"Invalid train_aug_mode '{train_aug_mode}'. Must be exactly one of: {valid_modes}")
@@ -52,8 +69,42 @@ def pipeline_H2Crop_unet_unique(
     checkpoint_dir = os.path.join("..", "checkpoints", "unique_subset", model_name, modality, f"split_{split_id}_pSize_{patch_size}")
     os.makedirs(checkpoint_dir, exist_ok=True)
     
+    device = torch.device("cuda" if use_gpu and torch.cuda.is_available() else "cpu")
+    print(f"Compute Device: {device}")
+
+    # ==========================================
+    # PHASE 1: INDEPENDENT U-NET SCALER FITTING
+    # ==========================================
+    print("\n--- Phase 1: Computing Global StandardScaler ---")
+    train_files = glob.glob(os.path.join(dataset_dir, "train", "*.npz"))
+    if debug:
+        train_files = train_files[:10]
+        
+    scaler = StandardScaler()
+    
+    # Process files in chunks to prevent CPU OOM errors
+    for chunk in tqdm(list(chunked_file_generator(train_files, chunk_size=500)), desc="Fitting Scaler (Batches)"):
+        X_chunk = load_chunk_into_memory(chunk, in_channels)
+        
+        # Neutralize NaNs and Infs before fitting the scaler
+        X_chunk = np.nan_to_num(X_chunk, nan=0.0, posinf=0.0, neginf=0.0)
+        scaler.partial_fit(X_chunk)
+        
+        del X_chunk
+        gc.collect()
+
+    scaler_path = os.path.join(checkpoint_dir, f"scaler_{modality}_split_{split_id}.joblib")
+    joblib.dump(scaler, scaler_path)
+    print(f"    -> Scaler saved to: {scaler_path}")
+    
+    # Convert Scikit-Learn arrays to GPU tensors and reshape for native PyTorch broadcasting (1, C, 1, 1)
+    scaler_mean = torch.tensor(scaler.mean_, dtype=torch.float32, device=device).view(1, in_channels, 1, 1)
+    scaler_scale = torch.tensor(scaler.scale_, dtype=torch.float32, device=device).view(1, in_channels, 1, 1)
+    
+    # ==========================================
+    # PHASE 2: DATA LOADING & TRAINING
+    # ==========================================
     print("\n--- Initializing PyTorch DataLoaders ---")
-    # Inject minority_classes back into the dataset loader for minority_class_aug[cite: 10]
     train_dataset = H2CropTileDataset(
         os.path.join(dataset_dir, "train"), 
         subset_classes=subset_classes, 
@@ -87,10 +138,6 @@ def pipeline_H2Crop_unet_unique(
     taxonomy_key = f'Taxonomy_{taxonomy}'
     target_names = [h2crop_taxonomy_dict.get(taxonomy_key, {}).get(c, f"Class {c}") if c != 0 else "Background (0)" for c in sample_y]
 
-    device = torch.device("cuda" if use_gpu and torch.cuda.is_available() else "cpu")
-    print(f"Compute Device: {device}")
-
-    # FINAL PRODUCTION TRAINING
     print(f"\n--- INITIATING FINAL TRAINING: {model_name} (Depth: {encoder_depth}) ---")
     
     model = UNet(
@@ -141,7 +188,9 @@ def pipeline_H2Crop_unet_unique(
             batch_X = batch_X.to(device, non_blocking=True)
             batch_y = batch_y.long().to(device, non_blocking=True)
             
+            # NATIVE GPU SCALING
             batch_X = torch.nan_to_num(batch_X, nan=0.0, posinf=0.0, neginf=0.0)
+            batch_X = (batch_X - scaler_mean) / scaler_scale
             
             optimizer.zero_grad()
             
@@ -177,7 +226,9 @@ def pipeline_H2Crop_unet_unique(
                 batch_X = batch_X.to(device, non_blocking=True)
                 batch_y = batch_y.long().to(device, non_blocking=True)
                 
+                # NATIVE GPU SCALING
                 batch_X = torch.nan_to_num(batch_X, nan=0.0, posinf=0.0, neginf=0.0)
+                batch_X = (batch_X - scaler_mean) / scaler_scale
                 
                 outputs = model(batch_X)
                 loss = criterion(outputs, batch_y)
@@ -245,7 +296,6 @@ def pipeline_H2Crop_unet_unique(
         
     print(f"    Saved {train_epochs} epoch checkpoints to: {checkpoint_dir}")
 
-    # 3. PLOT LEARNING CURVE & PER-CLASS VALIDATION F1 CURVE
     print("\n--- GENERATING LEARNING CURVES ---")
     fig_lc, ax_lc = plt.subplots(figsize=(10, 6))
     ax_lc.plot(range(1, train_epochs + 1), history_train_loss, label='Train Combined Loss', marker='o')
@@ -276,7 +326,6 @@ def pipeline_H2Crop_unet_unique(
     plt.savefig(val_f1_curve_path, dpi=300)
     plt.close(fig_f1)
 
-    # 4. TEST EVALUATION
     print(f"\n--- EVALUATING ON TEST SET ---")
     print(f"      [*] Loading best model weights (Val Crop mF1: {best_val_macro_f1_crops:.4f}) for final test...")
     model.load_state_dict(torch.load(best_model_path))
@@ -290,7 +339,9 @@ def pipeline_H2Crop_unet_unique(
             batch_X = batch_X.to(device, non_blocking=True)
             batch_y = batch_y.long().to(device, non_blocking=True)
             
+            # NATIVE GPU SCALING
             batch_X = torch.nan_to_num(batch_X, nan=0.0, posinf=0.0, neginf=0.0)
+            batch_X = (batch_X - scaler_mean) / scaler_scale
             
             outputs = model(batch_X)
                 
@@ -339,16 +390,13 @@ def pipeline_H2Crop_unet_unique(
     with open(os.path.join(results_out_dir, f"performance_split_{split_id}.txt"), "w") as f:
         f.write(f"--- Deep Learning Standard Inference ({model_name}) ---\n\n" + "\n".join(report_lines))
         
-    # Normalize by row (True labels) to show proportional accuracy
     cm_normalized = cm_numpy.astype('float') / cm_numpy.sum(axis=1)[:, np.newaxis]
-    cm_normalized = np.nan_to_num(cm_normalized) # Safely handle any zero-division
+    cm_normalized = np.nan_to_num(cm_normalized) 
 
     fig, ax = plt.subplots(figsize=(10, 8))
-    # Pass the normalized matrix to the display
     ConfusionMatrixDisplay(confusion_matrix=cm_normalized, display_labels=target_names).plot(ax=ax, cmap='Blues', colorbar=False, values_format='.2f')
     
-    ConfusionMatrixDisplay(confusion_matrix=cm_numpy, display_labels=target_names).plot(ax=ax, cmap='Blues', colorbar=False)
-    plt.title(f"Confusion Matrix: {model_name}\n({modality} | Split {split_id} | pSize {patch_size})")
+    plt.title(f"Confusion Matrix (Recall): {model_name}\n({modality} | Split {split_id} | pSize {patch_size})")
     plt.xticks(rotation=45, ha='right', fontsize=9)
     plt.tight_layout()
     plt.savefig(os.path.join(results_out_dir, f"confusion_matrix_split_{split_id}.png"), dpi=300)
