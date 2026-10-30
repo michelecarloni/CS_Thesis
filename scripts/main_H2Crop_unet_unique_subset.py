@@ -39,7 +39,7 @@ if __name__ == "__main__":
     apply_mild_balance = True
     
     # U-Net Training parameters
-    final_epochs = 80
+    final_epochs = 100
     batch_size = 32
     encoder_depth = 4
     train_aug_mode = "random_aug" 
