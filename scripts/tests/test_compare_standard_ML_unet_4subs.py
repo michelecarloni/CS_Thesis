@@ -26,7 +26,7 @@ patch_size = 64
 dataset_base = "../../ds"
 ml_checkpoints_base = "/media/michele/T7/checkpoints/checkpoints_8_standard_ML_tiles_4_subs_no_hyp_pSize_64_balance_split"
 unet_checkpoints_base = "/media/michele/T7/checkpoints/checkpoints_8_unet_pSize_64_balanced_split_min_class_aug"
-img_out_dir = "../../img"
+img_out_dir = "../../img_comp_4_subsets"
 
 
 def plot_inference_comparison(subset_id, num_samples, pSize, taxonomy=3, unet_encoders=["resnet18"]):

@@ -3,7 +3,7 @@ __pycache__/
 ds/
 checkpoints*/
 results*
-img/
+img*/
 unify_images.py
 latex/
 umap_img/
