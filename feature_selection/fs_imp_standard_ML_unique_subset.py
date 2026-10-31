@@ -147,7 +147,6 @@ if __name__ == "__main__":
             
             print(f"\n  --- Evaluating {mod.upper()} ---")
             
-            # UPDATED: Pulling the scaler directly from your dedicated external scalers path
             scaler_path = os.path.join(scalers_path, "unique_subset", mod, f"scaler_split_{split_id}_tax_{taxonomy}_pSize_{patch_size}.joblib")
             
             if not os.path.exists(scaler_path):
@@ -205,7 +204,18 @@ if __name__ == "__main__":
                         
                     df_importance[class_names[cls]] = importances
                     
-                    # Plot
+                    # ---------------------------------------------------------
+                    # NEW: Build and save class-specific sorted CSV
+                    # ---------------------------------------------------------
+                    df_class_sorted = pd.DataFrame({
+                        'band': np.arange(1, in_channels + 1),
+                        'drop': importances
+                    }).sort_values(by='drop', ascending=False)
+                    
+                    csv_class_path = os.path.join(out_dir, f"importance_class_{cls}_sorted.csv")
+                    df_class_sorted.to_csv(csv_class_path, index=False)
+                    
+                    # Generate Plot
                     fig, ax = plt.subplots(figsize=(10, 5))
                     ax.plot(df_importance['Band'], importances, color='darkred', linewidth=1.5)
                     ax.fill_between(df_importance['Band'], importances, alpha=0.3, color='salmon')
@@ -219,7 +229,7 @@ if __name__ == "__main__":
                     plt.savefig(os.path.join(out_dir, f"importance_class_{cls}.png"), dpi=200)
                     plt.close(fig)
 
-                # Save CSV for this algorithm
+                # Save Summary CSV containing all classes side-by-side
                 csv_path = os.path.join(out_dir, "feature_importance_summary.csv")
                 df_importance.to_csv(csv_path, index=False)
                 
