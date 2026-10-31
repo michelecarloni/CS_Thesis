@@ -25,7 +25,9 @@ from H2Crop.data_structures import h2crop_taxonomy_dict
 patch_size = 64
 dataset_base = "../../ds"
 ml_checkpoints_base = "/media/michele/T7/checkpoints/checkpoints_9_standard_ML_uniqueSub_split_same_tot_tiles"
-unet_checkpoints_base = "/media/michele/T7/checkpoints/checkpoints_9_unet_pSize64_uniqueSub_split_same_tot_tiles_min_class_aug"
+unet_checkpoints_base = "/media/michele/T7/checkpoints/checkpoints_9_unet_pSize64_uniqueSub_NoGlobalSetTiles_ScalerYes_random_aug"
+scalers_path = "/media/michele/T7/scalers/scalers_unique_subset" 
+
 img_out_dir = "../../img_comp_unique_subset"
 
 
@@ -33,8 +35,6 @@ def find_unet_model(base_dir, split_id, modality, use_best_model=True):
     """
     Recursively searches the base_dir to find the U-Net model 
     that matches the given split_id and modality.
-    If use_best_model is True, searches for 'best_model.pth'.
-    If False, searches for files matching 'epoch_*.pth'.
     """
     if use_best_model:
         search_pattern = os.path.join(base_dir, '**', 'best_model.pth')
@@ -43,11 +43,10 @@ def find_unet_model(base_dir, split_id, modality, use_best_model=True):
         
     all_models = glob.glob(search_pattern, recursive=True)
     
-    # If looking for epoch files and multiple exist, sort them to grab the latest one
     if not use_best_model:
         all_models = sorted(all_models)
     
-    for model_path in reversed(all_models): # reversed ensures we get the latest epoch if multiple match
+    for model_path in reversed(all_models): 
         if modality in model_path and f"split_{split_id}" in model_path:
             return model_path
             
@@ -57,30 +56,25 @@ def find_unet_model(base_dir, split_id, modality, use_best_model=True):
 def plot_inference_comparison(split_id, num_samples, pSize, taxonomy=3, unet_encoders=["resnet18"], use_best_model=True):
     """
     Generates comparative plots combining Hyperspectral and Multispectral rows in the SAME image.
-    Processes strictly 1 sample at a time with aggressive memory clearing.
-    Allows toggling between the best validation model and the final epoch model to counter overfitting.
+    Applies unified Standard Scaling independently for ML (CPU) and U-Net (GPU).
     """
     print(f"\n{'='*70}")
     model_type_str = "BEST MODEL" if use_best_model else "FINAL EPOCH"
     print(f"GENERATING COMBINED INFERENCE PLOTS | Unique Subset - Split {split_id} | pSize {pSize} | {model_type_str}")
     print(f"{'='*70}")
 
-    # CONFIGURATION & PATHS
     modalities = ["hyperspectral", "multispectral"]
     ml_models = ["decision_tree", "random_forest", "logistic_regression", "linear_svm"]
     
     titles = ["Ground Truth"] + [m.replace('_', ' ').title() for m in ml_models] + [f"UNET-{e.replace('resnet', 'ResNet')}" for e in unet_encoders]
 
-    # The unified classes for the unique subset
     subset_classes = [8, 11, 23, 30, 38, 1, 2, 10, 29, 50]
     num_classes = len(subset_classes) + 1
 
-    # COLORMAP & LEGEND SETUP
     unique_classes = [0] + sorted(subset_classes)
     taxonomy_key = f'Taxonomy_{taxonomy}'
     class_names = [h2crop_taxonomy_dict.get(taxonomy_key, {}).get(c, f"Class {c}") if c != 0 else "Background" for c in unique_classes]
     
-    # Generate exactly enough colors (11) for the background + 10 crops
     base_cmap = plt.cm.tab20.colors
     cmap_colors = ['black'] + [base_cmap[i % len(base_cmap)] for i in range(len(subset_classes))]
     custom_cmap = ListedColormap(cmap_colors)
@@ -90,7 +84,6 @@ def plot_inference_comparison(split_id, num_samples, pSize, taxonomy=3, unet_enc
     raw_to_plot_idx = {raw: idx for idx, raw in enumerate(unique_classes)}
     map_to_plot = np.vectorize(lambda x: raw_to_plot_idx.get(x, 0)) 
 
-    # Construct the specific dataset path dynamically for the unique subset structure
     current_dataset_base = os.path.join(dataset_base, "H2Crop_tiles_unique_subset", f"split_{split_id}")
     os.makedirs(img_out_dir, exist_ok=True)
 
@@ -112,25 +105,30 @@ def plot_inference_comparison(split_id, num_samples, pSize, taxonomy=3, unet_enc
         
     sampled_basenames = random.sample(common_files, min(num_samples, len(common_files)))
     
-    # Store exactly matching file paths
     hyper_paths = [os.path.join(hyper_test_dir, f) for f in sampled_basenames]
     multi_paths = [os.path.join(multi_test_dir, f) for f in sampled_basenames]
     
     print(f"    Successfully matched and sampled {len(sampled_basenames)} identical geographic tiles.")
 
-    # 2. LOAD MODELS & SCALERS (Done once, kept in memory)
+    # 2. LOAD MODELS & UNIFIED SCALERS
     print("\n--- Loading Models & Scalers ---")
-    scalers = {}
+    scalers_cpu = {}
+    scalers_gpu = {"mean": {}, "scale": {}}
     ml_networks = {"hyperspectral": {}, "multispectral": {}}
     unet_networks = {"hyperspectral": {}, "multispectral": {}}
     
     for mod in modalities:
         in_channels = 218 if mod == "hyperspectral" else 10
             
-        # Standard ML Scaler matching the unique subset training pipeline architecture
-        scaler_path = os.path.join(ml_checkpoints_base, "scalers", "unique_subset", mod, f"scaler_split_{split_id}_tax_{taxonomy}_pSize_{pSize}.joblib")
+        # Unified Scaler Load
+        scaler_path = os.path.join(scalers_path, "unique_subset", mod, f"scaler_split_{split_id}_tax_{taxonomy}_pSize_{pSize}.joblib")
         if os.path.exists(scaler_path):
-            scalers[mod] = joblib.load(scaler_path)
+            scaler = joblib.load(scaler_path)
+            scalers_cpu[mod] = scaler # Retained for Standard ML flat arrays
+            
+            # Convert to tensors for U-Net GPU Broadcasting
+            scalers_gpu["mean"][mod] = torch.tensor(scaler.mean_, dtype=torch.float32, device=device).view(1, in_channels, 1, 1)
+            scalers_gpu["scale"][mod] = torch.tensor(scaler.scale_, dtype=torch.float32, device=device).view(1, in_channels, 1, 1)
         else:
             print(f"    [Warning] Scaler not found at: {scaler_path}")
             
@@ -170,7 +168,7 @@ def plot_inference_comparison(split_id, num_samples, pSize, taxonomy=3, unet_enc
     # 3. STRICT 1-BY-1 INFERENCE & PLOT
     num_plots_row = 5 + len(unet_encoders)
     mul_k = 4 if num_plots_row == 7 else 5 if num_plots_row == 6 else 4
-    nrows = 2 # Strictly 2 rows per image (1 Hyper, 1 Multi)
+    nrows = 2 
     
     for idx, (hyper_file, multi_file) in enumerate(zip(hyper_paths, multi_paths)):
         print(f"\n    Generating plot {idx+1}/{len(hyper_paths)}...")
@@ -178,7 +176,6 @@ def plot_inference_comparison(split_id, num_samples, pSize, taxonomy=3, unet_enc
         fig, axes = plt.subplots(nrows, num_plots_row, figsize=(24, mul_k * nrows), gridspec_kw={'hspace': 0.45, 'wspace': 0.05})
         axes = np.atleast_2d(axes) 
         
-        # Process Hyperspectral in Row 0, Multispectral in Row 1
         for row_idx, (mod, file_path) in enumerate([("hyperspectral", hyper_file), ("multispectral", multi_file)]):
             in_channels = 218 if mod == "hyperspectral" else 10
             
@@ -190,10 +187,13 @@ def plot_inference_comparison(split_id, num_samples, pSize, taxonomy=3, unet_enc
             total_px = y_true.size
             predictions = [y_true]
             
-            # A) ML Inference
+            # A) Standard ML Inference (CPU Scaling)
             X_flat = X_raw.reshape(in_channels, -1).T
-            if mod in scalers:
-                X_flat = scalers[mod].transform(X_flat)
+            
+            # Neutralize NaNs before scaling
+            X_flat = np.nan_to_num(X_flat, nan=0.0, posinf=0.0, neginf=0.0)
+            if mod in scalers_cpu:
+                X_flat = scalers_cpu[mod].transform(X_flat)
                 
             for ml_algo in ml_models:
                 if ml_algo in ml_networks[mod]:
@@ -203,9 +203,14 @@ def plot_inference_comparison(split_id, num_samples, pSize, taxonomy=3, unet_enc
                 else:
                     predictions.append(np.zeros((H, W)))
                     
-            # B) U-Net Inference
+            # B) U-Net Inference (GPU Scaling)
             with torch.no_grad():
                 X_tensor = torch.tensor(X_raw, dtype=torch.float32).unsqueeze(0).to(device)
+                X_tensor = torch.nan_to_num(X_tensor, nan=0.0, posinf=0.0, neginf=0.0)
+                
+                if mod in scalers_gpu["mean"] and mod in scalers_gpu["scale"]:
+                    X_tensor = (X_tensor - scalers_gpu["mean"][mod]) / scalers_gpu["scale"][mod]
+                
                 for encoder in unet_encoders:
                     if encoder in unet_networks[mod]:
                         output = unet_networks[mod][encoder](X_tensor)
@@ -253,12 +258,10 @@ def plot_inference_comparison(split_id, num_samples, pSize, taxonomy=3, unet_enc
                     
                 del pred_plot_grid
                 
-            # Explicitly delete variables to free memory within the loop
             del X_raw, y_true, X_flat, X_tensor, predictions
             
         # D) Add Legend & Finalize
         fig.subplots_adjust(bottom=0.15)
-        # Cap ncol at 6 to prevent the legend for 11 items from running off the page horizontally
         fig.legend(handles=legend_patches, loc='lower center', ncol=min(6, len(unique_classes)), 
                    bbox_to_anchor=(0.5, 0.02), fontsize=14, frameon=False)
         
@@ -268,7 +271,6 @@ def plot_inference_comparison(split_id, num_samples, pSize, taxonomy=3, unet_enc
         
         plt.savefig(out_file, dpi=300, bbox_inches='tight', facecolor='white')
         
-        # AGGRESSIVE MEMORY CLEANUP
         fig.clf()
         plt.close(fig)
         plt.close('all')
