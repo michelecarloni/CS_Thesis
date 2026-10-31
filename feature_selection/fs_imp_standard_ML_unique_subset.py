@@ -24,7 +24,8 @@ num_splits = 3
 
 dataset_base = "../ds"
 ml_checkpoints_base = "/media/michele/T7/checkpoints/checkpoints_9_standard_ML_uniqueSub_split_same_tot_tiles"
-out_base_dir = "../feature_importance_results"
+scalers_path = "/media/michele/T7/scalers/scalers_unique_subset" 
+out_base_dir = "../feature_importance_unique_subset_standard_ML_results"
 
 modalities = ["hyperspectral", "multispectral"]
 ml_models = ["logistic_regression", "linear_svm", "decision_tree", "random_forest"]
@@ -146,9 +147,11 @@ if __name__ == "__main__":
             
             print(f"\n  --- Evaluating {mod.upper()} ---")
             
-            scaler_path = os.path.join(ml_checkpoints_base, "scalers", "unique_subset", mod, f"scaler_split_{split_id}_tax_{taxonomy}_pSize_{patch_size}.joblib")
+            # UPDATED: Pulling the scaler directly from your dedicated external scalers path
+            scaler_path = os.path.join(scalers_path, "unique_subset", mod, f"scaler_split_{split_id}_tax_{taxonomy}_pSize_{patch_size}.joblib")
+            
             if not os.path.exists(scaler_path):
-                print(f"      [Warning] Scaler missing for {mod}. Skipping.")
+                print(f"      [Warning] Scaler missing for {mod} at {scaler_path}. Skipping.")
                 continue
                 
             scaler = joblib.load(scaler_path)
