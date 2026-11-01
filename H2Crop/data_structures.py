@@ -242,6 +242,19 @@ h2crop_taxonomy_dict = {
 
 
 
+# MAPPING MULTISPECTRAL INDEXES TO SENTINEL-2 BANDS & WAVELENGTHS (nm)
+h2crop_multispectral_band_mapping = {
+    0: {"band": "B2 (Blue)", "wavelength_nm": 490},
+    1: {"band": "B3 (Green)", "wavelength_nm": 560},
+    2: {"band": "B4 (Red)", "wavelength_nm": 665},
+    3: {"band": "B5 (Red Edge 1)", "wavelength_nm": 705},
+    4: {"band": "B6 (Red Edge 2)", "wavelength_nm": 740},
+    5: {"band": "B7 (Red Edge 3)", "wavelength_nm": 783},
+    6: {"band": "B8 (NIR)", "wavelength_nm": 842},
+    7: {"band": "B8A (Narrow NIR)", "wavelength_nm": 865},
+    8: {"band": "B11 (SWIR 1)", "wavelength_nm": 1610},
+    9: {"band": "B12 (SWIR 2)", "wavelength_nm": 2190}
+}
 
 # MAPPING WAVELENGTH INDEXES TO (nm)
 h2crop_band_mapping = {
