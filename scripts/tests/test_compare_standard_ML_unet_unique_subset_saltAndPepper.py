@@ -31,27 +31,35 @@ scalers_path = "/run/media/michele/T7/scalers/scalers_unique_subset"
 img_out_dir = "../../img_comp_unique_subset_saltAndPepper"
 
 
-def add_salt_and_pepper_noise_raw(X_raw, noise_ratio=0.05):
+def add_spatial_salt_and_pepper_noise_raw(X_raw, noise_ratio=0.05):
     """
-    Applies salt and pepper noise to the RAW feature array BEFORE scaling.
-    Pepper = 0.0 (Dead sensor pixel)
-    Salt = Maximum value of the array (Saturated sensor pixel)
+    Applies spatial salt and pepper noise to the RAW feature array BEFORE scaling.
+    Instead of corrupting individual (C,H,W) points, this corrupts the entire 
+    pixel signature for a chosen (H,W) coordinate to simulate dead sensor pixels.
     """
     noisy_X = X_raw.copy()
+    C, H, W = noisy_X.shape
     
-    num_elements = noisy_X.size
-    num_salt = int(np.ceil(num_elements * (noise_ratio / 2.0)))
-    num_pepper = int(np.ceil(num_elements * (noise_ratio / 2.0)))
+    num_pixels = H * W
+    num_salt = int(np.ceil(num_pixels * (noise_ratio / 2.0)))
+    num_pepper = int(np.ceil(num_pixels * (noise_ratio / 2.0)))
     
-    # Generate random indices for salt and pepper across all dimensions (C, H, W)
-    coords_salt = [np.random.randint(0, dim, num_salt) for dim in noisy_X.shape]
-    coords_pepper = [np.random.randint(0, dim, num_pepper) for dim in noisy_X.shape]
+    # Generate random 2D spatial coordinates for the noise
+    salt_y = np.random.randint(0, H, num_salt)
+    salt_x = np.random.randint(0, W, num_salt)
     
-    # Apply physical sensor noise
-    noisy_X[tuple(coords_salt)] = np.max(noisy_X)  # Salt: Saturated 
-    noisy_X[tuple(coords_pepper)] = 0.0            # Pepper: Dead 
+    pepper_y = np.random.randint(0, H, num_pepper)
+    pepper_x = np.random.randint(0, W, num_pepper)
     
-    return noisy_X
+    # Calculate the realistic max value for EACH channel independently
+    channel_maxes = np.max(noisy_X, axis=(1, 2)) # Shape (C,)
+    
+    # Apply physical sensor noise across all channels for the chosen coordinates
+    for c in range(C):
+        noisy_X[c, salt_y, salt_x] = channel_maxes[c]  # Salt: Saturated per-channel
+        noisy_X[c, pepper_y, pepper_x] = 0.0           # Pepper: Dead 
+        
+    return noisy_X, (salt_y, salt_x), (pepper_y, pepper_x)
 
 
 def find_unet_model(base_dir, split_id, modality, use_best_model=True):
@@ -70,16 +78,16 @@ def find_unet_model(base_dir, split_id, modality, use_best_model=True):
     return None
 
 
-def plot_inference_comparison_sp(split_id, num_samples, pSize, taxonomy=3, unet_encoders=["resnet18"], use_best_model=True, noise_ratio=0.05):
+def plot_inference_comparison_combined(split_id, num_samples, pSize, taxonomy=3, unet_encoders=["resnet18"], use_best_model=True, noise_ratio=0.05):
     print(f"\n{'='*70}")
     model_type_str = "BEST MODEL" if use_best_model else "FINAL EPOCH"
-    print(f"GENERATING S&P NOISE PLOTS | Unique Subset - Split {split_id} | Ratio {noise_ratio:.2f} | {model_type_str}")
+    print(f"GENERATING COMBINED (CLEAN & NOISY) PLOTS | Unique Subset - Split {split_id} | Ratio {noise_ratio:.2f} | {model_type_str}")
     print(f"{'='*70}")
 
     modalities = ["hyperspectral", "multispectral"]
     ml_models = ["decision_tree", "random_forest", "logistic_regression", "linear_svm"]
     
-    titles = ["Ground Truth", f"Noisy GT\n(Ratio: {noise_ratio})"] + [m.replace('_', ' ').title() for m in ml_models] + [f"UNET-{e.replace('resnet', 'ResNet')}" for e in unet_encoders]
+    titles = ["Ground Truth"] + [m.replace('_', ' ').title() for m in ml_models] + [f"UNET-{e.replace('resnet', 'ResNet')}" for e in unet_encoders]
 
     subset_classes = [8, 11, 23, 30, 38, 1, 2, 10, 29, 50]
     num_classes = len(subset_classes) + 1
@@ -92,9 +100,7 @@ def plot_inference_comparison_sp(split_id, num_samples, pSize, taxonomy=3, unet_
     cmap_colors = ['black'] + [base_cmap[i % len(base_cmap)] for i in range(len(subset_classes))]
     custom_cmap = ListedColormap(cmap_colors)
     
-    # Visualization Colors for Noisy GT: 
-    # len(unique_classes) = Salt (White)
-    # len(unique_classes) + 1 = Pepper (DimGray, so it doesn't blend into the black background)
+    # Extended colormap for Noisy GT Visualization (Salt=White, Pepper=DimGray)
     noisy_cmap_colors = cmap_colors + ['white', 'dimgray']
     noisy_custom_cmap = ListedColormap(noisy_cmap_colors)
     
@@ -160,61 +166,72 @@ def plot_inference_comparison_sp(split_id, num_samples, pSize, taxonomy=3, unet_
                             block_indices.append(idx)
                         except ValueError:
                             pass
-                
                 inferred_depth = max(block_indices) + 1 if block_indices else 3
                 model = UNet(in_channels=in_channels, num_classes=num_classes, encoder_name=encoder, encoder_depth=inferred_depth).to(device)
                 model.load_state_dict(state_dict)
                 model.eval()
                 unet_networks[mod][encoder] = model
 
-    # 3. STRICT 1-BY-1 INFERENCE & PLOT
-    num_plots_row = 6 + len(unet_encoders)
-    mul_k = 4 if num_plots_row == 7 else 5 if num_plots_row == 6 else 4
-    nrows = 2 
+    # 3. COMBINED INFERENCE & PLOTTING LOOP
+    row_configs = [
+        ("hyperspectral", "Clean"),
+        ("hyperspectral", "Noisy"),
+        ("multispectral", "Clean"),
+        ("multispectral", "Noisy")
+    ]
+    nrows = len(row_configs)
+    num_plots_row = 1 + len(ml_models) + len(unet_encoders)
     
     for idx, (hyper_file, multi_file) in enumerate(zip(hyper_paths, multi_paths)):
-        print(f"\n    Generating S&P plot {idx+1}/{len(hyper_paths)}...")
+        print(f"\n    Generating combined plot {idx+1}/{len(hyper_paths)}...")
         
-        fig, axes = plt.subplots(nrows, num_plots_row, figsize=(24, mul_k * nrows), gridspec_kw={'hspace': 0.45, 'wspace': 0.05})
-        axes = np.atleast_2d(axes) 
+        fig, axes = plt.subplots(nrows, num_plots_row, figsize=(24, 4.5 * nrows), gridspec_kw={'hspace': 0.4, 'wspace': 0.05})
         
-        for row_idx, (mod, file_path) in enumerate([("hyperspectral", hyper_file), ("multispectral", multi_file)]):
+        with np.load(hyper_file) as data:
+            X_hyper_clean = data['X'] 
+            y_true = data['y']
+        with np.load(multi_file) as data:
+            X_multi_clean = data['X']
+            
+        H, W = y_true.shape
+        total_px = y_true.size
+            
+        # Apply structured spatial noise to RAW data
+        X_hyper_noisy, h_salt, h_pepper = add_spatial_salt_and_pepper_noise_raw(X_hyper_clean, noise_ratio)
+        X_multi_noisy, m_salt, m_pepper = add_spatial_salt_and_pepper_noise_raw(X_multi_clean, noise_ratio)
+        
+        for row_idx, (mod, state) in enumerate(row_configs):
+            is_noisy = (state == "Noisy")
             in_channels = 218 if mod == "hyperspectral" else 10
             
-            with np.load(file_path) as data:
-                X_raw = data['X'] 
-                y_true = data['y']
+            # Select the correct X_raw based on row config
+            X_raw = X_hyper_noisy if is_noisy and mod == "hyperspectral" else \
+                    X_hyper_clean if not is_noisy and mod == "hyperspectral" else \
+                    X_multi_noisy if is_noisy and mod == "multispectral" else \
+                    X_multi_clean
+            
+            # 1st column is either Clean GT or Noisy GT visualization
+            if is_noisy:
+                salt_coords = h_salt if mod == "hyperspectral" else m_salt
+                pepper_coords = h_pepper if mod == "hyperspectral" else m_pepper
                 
-            H, W = y_true.shape
-            total_px = y_true.size
-            
-            # --- 1. VISUALIZE NOISE ON GROUND TRUTH ---
-            num_salt = int(np.ceil(total_px * (noise_ratio / 2.0)))
-            num_pepper = int(np.ceil(total_px * (noise_ratio / 2.0)))
-            
-            coords_salt = [np.random.randint(0, dim, num_salt) for dim in y_true.shape]
-            coords_pepper = [np.random.randint(0, dim, num_pepper) for dim in y_true.shape]
-            
-            y_true_noisy_vis = y_true.copy()
-            y_true_noisy_vis[tuple(coords_salt)] = len(unique_classes)     # Mapped to White
-            y_true_noisy_vis[tuple(coords_pepper)] = len(unique_classes) + 1 # Mapped to DimGray
-            
-            predictions = [y_true, y_true_noisy_vis]
-            
-            # --- 2. APPLY NOISE TO RAW DATA BEFORE SCALING ---
-            X_raw_noisy = add_salt_and_pepper_noise_raw(X_raw, noise_ratio=noise_ratio)
+                y_true_noisy_vis = y_true.copy()
+                y_true_noisy_vis[salt_coords] = len(unique_classes)
+                y_true_noisy_vis[pepper_coords] = len(unique_classes) + 1
+                predictions = [y_true_noisy_vis]
+            else:
+                predictions = [y_true]
             
             # A) Standard ML Inference
-            X_flat_noisy = X_raw_noisy.reshape(in_channels, -1).T
-            X_flat_noisy = np.nan_to_num(X_flat_noisy, nan=0.0, posinf=0.0, neginf=0.0)
+            X_flat = X_raw.reshape(in_channels, -1).T
+            X_flat = np.nan_to_num(X_flat, nan=0.0, posinf=0.0, neginf=0.0)
             
             if mod in scalers_cpu:
-                # Scale the noisy data using the fitted standard scaler
-                X_flat_noisy = scalers_cpu[mod].transform(X_flat_noisy)
+                X_flat = scalers_cpu[mod].transform(X_flat)
                 
             for ml_algo in ml_models:
                 if ml_algo in ml_networks[mod]:
-                    y_pred_flat = ml_networks[mod][ml_algo].predict(X_flat_noisy)
+                    y_pred_flat = ml_networks[mod][ml_algo].predict(X_flat)
                     predictions.append(y_pred_flat.reshape(H, W))
                     del y_pred_flat
                 else:
@@ -222,15 +239,15 @@ def plot_inference_comparison_sp(split_id, num_samples, pSize, taxonomy=3, unet_
                     
             # B) U-Net Inference
             with torch.no_grad():
-                X_tensor_noisy = torch.tensor(X_raw_noisy, dtype=torch.float32).unsqueeze(0).to(device)
-                X_tensor_noisy = torch.nan_to_num(X_tensor_noisy, nan=0.0, posinf=0.0, neginf=0.0)
+                X_tensor = torch.tensor(X_raw, dtype=torch.float32).unsqueeze(0).to(device)
+                X_tensor = torch.nan_to_num(X_tensor, nan=0.0, posinf=0.0, neginf=0.0)
                 
                 if mod in scalers_gpu["mean"] and mod in scalers_gpu["scale"]:
-                    X_tensor_noisy = (X_tensor_noisy - scalers_gpu["mean"][mod]) / scalers_gpu["scale"][mod]
+                    X_tensor = (X_tensor - scalers_gpu["mean"][mod]) / scalers_gpu["scale"][mod]
                 
                 for encoder in unet_encoders:
                     if encoder in unet_networks[mod]:
-                        output = unet_networks[mod][encoder](X_tensor_noisy)
+                        output = unet_networks[mod][encoder](X_tensor)
                         pred_mapped = torch.max(output, 1)[1].squeeze(0).cpu().numpy()
                         pred_raw = np.vectorize(inverse_mapping.get)(pred_mapped)
                         predictions.append(pred_raw)
@@ -242,13 +259,12 @@ def plot_inference_comparison_sp(split_id, num_samples, pSize, taxonomy=3, unet_
             for col_idx, (pred_raw_grid, title) in enumerate(zip(predictions, titles)):
                 ax = axes[row_idx, col_idx]
                 
-                if col_idx == 1:
-                    # GT Noisy Visualization uses the extended colormap (includes White and DimGray)
-                    # We map raw classes normally, but leave the corrupted indices (len and len+1) as is
+                if col_idx == 0 and is_noisy:
                     mapped_grid = map_to_plot(pred_raw_grid)
                     mapped_grid = np.where(pred_raw_grid == len(unique_classes), len(unique_classes), mapped_grid)
                     mapped_grid = np.where(pred_raw_grid == len(unique_classes) + 1, len(unique_classes) + 1, mapped_grid)
                     ax.imshow(mapped_grid, cmap=noisy_custom_cmap, vmin=0, vmax=len(unique_classes)+1, interpolation='nearest')
+                    if row_idx == 0: title = f"Noisy GT\n(Ratio: {noise_ratio})"
                 else:
                     pred_plot_grid = map_to_plot(pred_raw_grid)
                     ax.imshow(pred_plot_grid, cmap=custom_cmap, vmin=0, vmax=len(unique_classes)-1, interpolation='nearest')
@@ -260,8 +276,10 @@ def plot_inference_comparison_sp(split_id, num_samples, pSize, taxonomy=3, unet_
                     ax.set_title(title, fontsize=16, pad=12)
                     
                 if col_idx == 0:
-                    ax.set_ylabel(f"{mod.title()}\nSample {idx + 1}", fontsize=14, labelpad=15, rotation=90)
-                elif col_idx > 1: 
+                    y_label = f"{mod.title()}\n({state})\nSample {idx + 1}"
+                    ax.set_ylabel(y_label, fontsize=14, labelpad=15, rotation=90)
+                
+                elif col_idx > 0: 
                     correct_px = np.sum(pred_raw_grid == y_true)
                     acc = correct_px / total_px if total_px > 0 else 0.0
 
@@ -282,16 +300,16 @@ def plot_inference_comparison_sp(split_id, num_samples, pSize, taxonomy=3, unet_
                     metrics_text = f"{miou_text} | OA: {acc:.1%}"
                     ax.set_xlabel(metrics_text, fontsize=12, fontweight='bold', color='black', labelpad=8)
                     
-            del X_raw, y_true, X_raw_noisy, X_flat_noisy, X_tensor_noisy, predictions
+            del X_raw, X_flat, X_tensor, predictions
             
         # D) Add Legend & Finalize
-        fig.subplots_adjust(bottom=0.15)
+        fig.subplots_adjust(bottom=0.10)
         fig.legend(handles=legend_patches, loc='lower center', ncol=min(6, len(unique_classes)), 
-                   bbox_to_anchor=(0.5, 0.02), fontsize=14, frameon=False)
+                   bbox_to_anchor=(0.5, 0.01), fontsize=14, frameon=False)
         
         random_id = uuid.uuid4().hex[:8]
         type_str = "best" if use_best_model else "epoch"
-        out_file = os.path.join(img_out_dir, f"inference_noisy_split_{split_id}_{type_str}_sample_{idx+1}_{random_id}.png")
+        out_file = os.path.join(img_out_dir, f"inference_combined_split_{split_id}_{type_str}_sample_{idx+1}_{random_id}.png")
         
         plt.savefig(out_file, dpi=300, bbox_inches='tight', facecolor='white')
         
@@ -313,7 +331,7 @@ if __name__ == "__main__":
  
     for split in split_list:
         for i in range(0, num_iter):
-            plot_inference_comparison_sp(
+            plot_inference_comparison_combined(
                 split_id=split, 
                 num_samples=1, 
                 pSize=patch_size, 
