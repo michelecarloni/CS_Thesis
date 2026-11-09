@@ -177,7 +177,8 @@ def plot_inference_comparison_combined(split_id, num_samples, pSize, taxonomy=3,
     for idx, (hyper_file, multi_file) in enumerate(zip(hyper_paths, multi_paths)):
         print(f"\n    Generating combined plot {idx+1}/{len(hyper_paths)}...")
         
-        fig, axes = plt.subplots(nrows, num_plots_row, figsize=(24, 4.5 * nrows), gridspec_kw={'hspace': 0.4, 'wspace': 0.05})
+        # Slightly increased vertical spacing and figsize to accommodate the two-line x-labels
+        fig, axes = plt.subplots(nrows, num_plots_row, figsize=(24, 4.8 * nrows), gridspec_kw={'hspace': 0.45, 'wspace': 0.05})
         
         with np.load(hyper_file) as data:
             X_hyper_clean = data['X'] 
@@ -205,7 +206,6 @@ def plot_inference_comparison_combined(split_id, num_samples, pSize, taxonomy=3,
                 pepper_coords = h_pepper if mod == "hyperspectral" else m_pepper
                 
                 y_true_noisy_vis = y_true.copy()
-                # Used out-of-bounds indices (999 and 1000) to prevent collision with crop class IDs
                 y_true_noisy_vis[salt_coords] = 999
                 y_true_noisy_vis[pepper_coords] = 1000
                 predictions = [y_true_noisy_vis]
@@ -248,7 +248,6 @@ def plot_inference_comparison_combined(split_id, num_samples, pSize, taxonomy=3,
                 
                 if col_idx == 0 and is_noisy:
                     mapped_grid = map_to_plot(pred_raw_grid)
-                    # Safely map 999 to the white palette index, and 1000 to dimgray
                     mapped_grid = np.where(pred_raw_grid == 999, len(unique_classes), mapped_grid)
                     mapped_grid = np.where(pred_raw_grid == 1000, len(unique_classes) + 1, mapped_grid)
                     ax.imshow(mapped_grid, cmap=noisy_custom_cmap, vmin=0, vmax=len(unique_classes)+1, interpolation='nearest')
@@ -281,11 +280,27 @@ def plot_inference_comparison_combined(split_id, num_samples, pSize, taxonomy=3,
                             union = np.sum((pred_raw_grid == c) | (y_true == c))
                             iou_list.append(intersection / union if union > 0 else 0.0)
                         mIoU = np.mean(iou_list)
-                        miou_text = f"mIoU: {mIoU:.1%}"
+                        miou_text = f"mIoU: {mIoU:.2f}"
                     else:
                         miou_text = "mIoU: N/A"
                         
-                    metrics_text = f"{miou_text} | OA: {acc:.1%}"
+                    metrics_text = f"{miou_text} | OA: {acc:.2f}"
+                    
+                    if is_noisy:
+                        noisy_mask = np.zeros_like(y_true, dtype=bool)
+                        noisy_mask[salt_coords] = True
+                        noisy_mask[pepper_coords] = True
+                        
+                        tot_noisy = np.sum(noisy_mask)
+                        if tot_noisy > 0:
+                            correct_noisy = np.sum((pred_raw_grid == y_true) & noisy_mask)
+                            noise_acc = correct_noisy / tot_noisy
+                        else:
+                            noise_acc = 0.0
+                            
+                        # Add newline character to push N-Acc below the other metrics
+                        metrics_text += f"\nS&P-Acc: {noise_acc:.2f}"
+                        
                     ax.set_xlabel(metrics_text, fontsize=12, fontweight='bold', color='black', labelpad=8)
                     
             del X_raw, X_flat, X_tensor, predictions
