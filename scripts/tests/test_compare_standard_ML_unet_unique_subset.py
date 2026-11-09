@@ -24,9 +24,9 @@ from H2Crop.data_structures import h2crop_taxonomy_dict
 # ==========================================
 patch_size = 64
 dataset_base = "../../ds"
-ml_checkpoints_base = "/media/michele/T7/checkpoints/checkpoints_9_standard_ML_uniqueSub_split_same_tot_tiles"
-unet_checkpoints_base = "/media/michele/T7/checkpoints/checkpoints_9_unet_pSize64_uniqueSub_NoGlobalSetTiles_ScalerYes_random_aug"
-scalers_path = "/media/michele/T7/scalers/scalers_unique_subset" 
+ml_checkpoints_base = "/run/media/michele/T7/checkpoints/checkpoints_9_standard_ML_uniqueSub_split_same_tot_tiles"
+unet_checkpoints_base = "/run/media/michele/T7/checkpoints/checkpoints_9_unet_pSize64_uniqueSub_NoGlobalSetTiles_ScalerYes_random_aug"
+scalers_path = "/run/media/michele/T7/scalers/scalers_unique_subset" 
 
 img_out_dir = "../../img_comp_unique_subset"
 
