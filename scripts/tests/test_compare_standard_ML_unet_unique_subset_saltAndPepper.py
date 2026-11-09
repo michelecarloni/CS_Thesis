@@ -34,8 +34,7 @@ img_out_dir = "../../img_comp_unique_subset_saltAndPepper"
 def add_spatial_salt_and_pepper_noise_raw(X_raw, noise_ratio=0.05):
     """
     Applies spatial salt and pepper noise to the RAW feature array BEFORE scaling.
-    Instead of corrupting individual (C,H,W) points, this corrupts the entire 
-    pixel signature for a chosen (H,W) coordinate to simulate dead sensor pixels.
+    Corrupts the entire pixel signature for a chosen (H,W) coordinate.
     """
     noisy_X = X_raw.copy()
     C, H, W = noisy_X.shape
@@ -44,20 +43,17 @@ def add_spatial_salt_and_pepper_noise_raw(X_raw, noise_ratio=0.05):
     num_salt = int(np.ceil(num_pixels * (noise_ratio / 2.0)))
     num_pepper = int(np.ceil(num_pixels * (noise_ratio / 2.0)))
     
-    # Generate random 2D spatial coordinates for the noise
     salt_y = np.random.randint(0, H, num_salt)
     salt_x = np.random.randint(0, W, num_salt)
     
     pepper_y = np.random.randint(0, H, num_pepper)
     pepper_x = np.random.randint(0, W, num_pepper)
     
-    # Calculate the realistic max value for EACH channel independently
-    channel_maxes = np.max(noisy_X, axis=(1, 2)) # Shape (C,)
+    channel_maxes = np.max(noisy_X, axis=(1, 2)) 
     
-    # Apply physical sensor noise across all channels for the chosen coordinates
     for c in range(C):
-        noisy_X[c, salt_y, salt_x] = channel_maxes[c]  # Salt: Saturated per-channel
-        noisy_X[c, pepper_y, pepper_x] = 0.0           # Pepper: Dead 
+        noisy_X[c, salt_y, salt_x] = channel_maxes[c]  
+        noisy_X[c, pepper_y, pepper_x] = 0.0           
         
     return noisy_X, (salt_y, salt_x), (pepper_y, pepper_x)
 
@@ -100,7 +96,6 @@ def plot_inference_comparison_combined(split_id, num_samples, pSize, taxonomy=3,
     cmap_colors = ['black'] + [base_cmap[i % len(base_cmap)] for i in range(len(subset_classes))]
     custom_cmap = ListedColormap(cmap_colors)
     
-    # Extended colormap for Noisy GT Visualization (Salt=White, Pepper=DimGray)
     noisy_cmap_colors = cmap_colors + ['white', 'dimgray']
     noisy_custom_cmap = ListedColormap(noisy_cmap_colors)
     
@@ -115,7 +110,6 @@ def plot_inference_comparison_combined(split_id, num_samples, pSize, taxonomy=3,
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 1. SYNCHRONIZED FILE SAMPLING
     print("\n--- Synchronizing Test Samples ---")
     hyper_test_dir = os.path.join(current_dataset_base, f"hyperspectral_taxonomy_{taxonomy}_pSize_{pSize}", "test")
     multi_test_dir = os.path.join(current_dataset_base, f"multispectral_taxonomy_{taxonomy}_pSize_{pSize}", "test")
@@ -132,7 +126,6 @@ def plot_inference_comparison_combined(split_id, num_samples, pSize, taxonomy=3,
     hyper_paths = [os.path.join(hyper_test_dir, f) for f in sampled_basenames]
     multi_paths = [os.path.join(multi_test_dir, f) for f in sampled_basenames]
 
-    # 2. LOAD MODELS & UNIFIED SCALERS
     print("\n--- Loading Models & Scalers ---")
     scalers_cpu = {}
     scalers_gpu = {"mean": {}, "scale": {}}
@@ -172,7 +165,6 @@ def plot_inference_comparison_combined(split_id, num_samples, pSize, taxonomy=3,
                 model.eval()
                 unet_networks[mod][encoder] = model
 
-    # 3. COMBINED INFERENCE & PLOTTING LOOP
     row_configs = [
         ("hyperspectral", "Clean"),
         ("hyperspectral", "Noisy"),
@@ -196,7 +188,6 @@ def plot_inference_comparison_combined(split_id, num_samples, pSize, taxonomy=3,
         H, W = y_true.shape
         total_px = y_true.size
             
-        # Apply structured spatial noise to RAW data
         X_hyper_noisy, h_salt, h_pepper = add_spatial_salt_and_pepper_noise_raw(X_hyper_clean, noise_ratio)
         X_multi_noisy, m_salt, m_pepper = add_spatial_salt_and_pepper_noise_raw(X_multi_clean, noise_ratio)
         
@@ -204,25 +195,23 @@ def plot_inference_comparison_combined(split_id, num_samples, pSize, taxonomy=3,
             is_noisy = (state == "Noisy")
             in_channels = 218 if mod == "hyperspectral" else 10
             
-            # Select the correct X_raw based on row config
             X_raw = X_hyper_noisy if is_noisy and mod == "hyperspectral" else \
                     X_hyper_clean if not is_noisy and mod == "hyperspectral" else \
                     X_multi_noisy if is_noisy and mod == "multispectral" else \
                     X_multi_clean
             
-            # 1st column is either Clean GT or Noisy GT visualization
             if is_noisy:
                 salt_coords = h_salt if mod == "hyperspectral" else m_salt
                 pepper_coords = h_pepper if mod == "hyperspectral" else m_pepper
                 
                 y_true_noisy_vis = y_true.copy()
-                y_true_noisy_vis[salt_coords] = len(unique_classes)
-                y_true_noisy_vis[pepper_coords] = len(unique_classes) + 1
+                # Used out-of-bounds indices (999 and 1000) to prevent collision with crop class IDs
+                y_true_noisy_vis[salt_coords] = 999
+                y_true_noisy_vis[pepper_coords] = 1000
                 predictions = [y_true_noisy_vis]
             else:
                 predictions = [y_true]
             
-            # A) Standard ML Inference
             X_flat = X_raw.reshape(in_channels, -1).T
             X_flat = np.nan_to_num(X_flat, nan=0.0, posinf=0.0, neginf=0.0)
             
@@ -237,7 +226,6 @@ def plot_inference_comparison_combined(split_id, num_samples, pSize, taxonomy=3,
                 else:
                     predictions.append(np.zeros((H, W)))
                     
-            # B) U-Net Inference
             with torch.no_grad():
                 X_tensor = torch.tensor(X_raw, dtype=torch.float32).unsqueeze(0).to(device)
                 X_tensor = torch.nan_to_num(X_tensor, nan=0.0, posinf=0.0, neginf=0.0)
@@ -255,14 +243,14 @@ def plot_inference_comparison_combined(split_id, num_samples, pSize, taxonomy=3,
                     else:
                         predictions.append(np.zeros((H, W)))
 
-            # C) Plot Row
             for col_idx, (pred_raw_grid, title) in enumerate(zip(predictions, titles)):
                 ax = axes[row_idx, col_idx]
                 
                 if col_idx == 0 and is_noisy:
                     mapped_grid = map_to_plot(pred_raw_grid)
-                    mapped_grid = np.where(pred_raw_grid == len(unique_classes), len(unique_classes), mapped_grid)
-                    mapped_grid = np.where(pred_raw_grid == len(unique_classes) + 1, len(unique_classes) + 1, mapped_grid)
+                    # Safely map 999 to the white palette index, and 1000 to dimgray
+                    mapped_grid = np.where(pred_raw_grid == 999, len(unique_classes), mapped_grid)
+                    mapped_grid = np.where(pred_raw_grid == 1000, len(unique_classes) + 1, mapped_grid)
                     ax.imshow(mapped_grid, cmap=noisy_custom_cmap, vmin=0, vmax=len(unique_classes)+1, interpolation='nearest')
                     if row_idx == 0: title = f"Noisy GT\n(Ratio: {noise_ratio})"
                 else:
@@ -302,7 +290,6 @@ def plot_inference_comparison_combined(split_id, num_samples, pSize, taxonomy=3,
                     
             del X_raw, X_flat, X_tensor, predictions
             
-        # D) Add Legend & Finalize
         fig.subplots_adjust(bottom=0.10)
         fig.legend(handles=legend_patches, loc='lower center', ncol=min(6, len(unique_classes)), 
                    bbox_to_anchor=(0.5, 0.01), fontsize=14, frameon=False)
