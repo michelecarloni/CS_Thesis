@@ -23,8 +23,8 @@ taxonomy = 3
 num_splits = 3
 
 dataset_base = "../ds"
-ml_checkpoints_base = "/media/michele/T7/checkpoints/checkpoints_9_standard_ML_uniqueSub_split_same_tot_tiles"
-scalers_path = "/media/michele/T7/scalers/scalers_unique_subset" 
+ml_checkpoints_base = "/run/media/michele/T7/checkpoints/checkpoints_9_standard_ML_uniqueSub_split_same_tot_tiles"
+scalers_path = "/run/media/michele/T7/scalers/scalers_unique_subset" 
 out_base_dir = "../feature_importance_unique_subset_standard_ML_results"
 
 modalities = ["hyperspectral", "multispectral"]
@@ -34,9 +34,7 @@ subset_classes = [8, 11, 23, 30, 38, 1, 2, 10, 29, 50]
 unique_classes = [0] + sorted(subset_classes)
 
 # Memory Control Parameters
-# 1. How many raw pixels per class to pull into RAM initially (safeguard pool)
 max_test_pool_per_class = 5000  
-# 2. How many CORRECTLY PREDICTED pixels to use for the permutation (to calculate the actual drop in accuracy)
 max_permutation_samples = 2000  
 
 # Load Taxonomy Names
@@ -46,11 +44,6 @@ class_names[0] = "Background"
 
 
 def extract_synchronized_test_pool(split_id, target_classes, patch_size):
-    """
-    Two-pass memory-safe extraction. 
-    Finds common geographical files, maps the location of all classes, 
-    and extracts a strict maximum number of pixels synchronously for both modalities.
-    """
     print(f"    -> Scanning test files for Split {split_id}...")
     
     hyper_dir = os.path.join(dataset_base, "H2Crop_tiles_unique_subset", f"split_{split_id}", f"hyperspectral_taxonomy_3_pSize_{patch_size}", "test")
@@ -64,7 +57,6 @@ def extract_synchronized_test_pool(split_id, target_classes, patch_size):
         print(f"       [Error] No common files found for Split {split_id}!")
         return None, None, None
 
-    # Pass 1: Global count based on the Y labels (identical for both)
     y_arrays = []
     pixels_per_file = []
     for f in common_files:
@@ -89,7 +81,6 @@ def extract_synchronized_test_pool(split_id, target_classes, patch_size):
     del y_global, y_arrays
     gc.collect()
 
-    # Pass 2: Exact Extraction
     total_selected = len(selected_global_indices)
     print(f"    -> Loading exactly {total_selected} synchronized pixels into memory...")
     
@@ -136,7 +127,6 @@ if __name__ == "__main__":
         print(f"STARTING SPLIT {split_id}")
         print(f"{'='*70}")
         
-        # 1. LOAD SYNCHRONIZED POOL ONCE PER SPLIT
         X_hyper_raw, X_multi_raw, y_test = extract_synchronized_test_pool(split_id, unique_classes, patch_size)
         if y_test is None:
             continue
@@ -167,20 +157,18 @@ if __name__ == "__main__":
                 out_dir = os.path.join(out_base_dir, mod, f"split_{split_id}", ml_algo)
                 os.makedirs(out_dir, exist_ok=True)
                 
-                # Predict on the pool
                 y_pred = model.predict(X_test_scaled)
                 
-                df_importance = pd.DataFrame({'Band': np.arange(1, in_channels + 1)})
+                # Shifted to 0-based indexing to align perfectly with the LaTeX mapping script
+                df_importance = pd.DataFrame({'Band': np.arange(0, in_channels)})
                 
                 for cls in unique_classes:
-                    # Find indices where model was CORRECT
                     correct_indices = np.where((y_test == cls) & (y_pred == cls))[0]
                     
                     if len(correct_indices) == 0:
                         df_importance[class_names[cls]] = 0.0
                         continue
                         
-                    # Sample correctly predicted pixels for the permutation test
                     np.random.seed(42)
                     sampled_indices = np.random.choice(
                         correct_indices, 
@@ -204,44 +192,64 @@ if __name__ == "__main__":
                         
                     df_importance[class_names[cls]] = importances
                     
-                    # ---------------------------------------------------------
-                    # NEW: Build and save class-specific sorted CSV
-                    # ---------------------------------------------------------
                     df_class_sorted = pd.DataFrame({
-                        'band': np.arange(1, in_channels + 1),
+                        'band': np.arange(0, in_channels),
                         'drop': importances
                     }).sort_values(by='drop', ascending=False)
                     
                     csv_class_path = os.path.join(out_dir, f"importance_class_{cls}_sorted.csv")
                     df_class_sorted.to_csv(csv_class_path, index=False)
                     
-                    # Generate Plot
-                    fig, ax = plt.subplots(figsize=(10, 5))
-                    ax.plot(df_importance['Band'], importances, color='darkred', linewidth=1.5)
-                    ax.fill_between(df_importance['Band'], importances, alpha=0.3, color='salmon')
+                    # Generate Histogram Plot instead of a Line Plot
+                    fig, ax = plt.subplots(figsize=(12, 6))
                     
-                    ax.set_title(f"Band Importance for {class_names[cls]}\n({ml_algo.replace('_', ' ').title()} | {mod.title()} | Split {split_id})", fontsize=12, pad=10)
-                    ax.set_xlabel("Band Index", fontsize=10)
-                    ax.set_ylabel("Drop in Accuracy (Importance)", fontsize=10)
-                    ax.grid(True, linestyle='--', alpha=0.6)
+                    # Ensure positive values for visualization by clipping at 0 (noise can sometimes cause tiny negative drops)
+                    positive_importances = np.clip(importances, a_min=0, a_max=None)
+                    
+                    # Create the bar chart
+                    bars = ax.bar(df_importance['Band'], positive_importances, color='steelblue', edgecolor='black', linewidth=0.5)
+                    
+                    # Add a horizontal line at 0 for visual baseline
+                    ax.axhline(y=0, color='black', linewidth=1)
+                    
+                    ax.set_title(f"Band Importance Histogram: {class_names[cls]}\n({ml_algo.replace('_', ' ').title()} | {mod.title()} | Split {split_id})", fontsize=14, pad=15, fontweight='bold')
+                    ax.set_xlabel("Band Index", fontsize=12)
+                    ax.set_ylabel("Drop in Accuracy", fontsize=12)
+                    
+                    # Format grid lines behind the bars
+                    ax.set_axisbelow(True)
+                    ax.grid(axis='y', linestyle='--', alpha=0.7)
+                    
+                    # Adjust X-axis ticks for readability depending on modality
+                    if mod == "hyperspectral":
+                        ax.set_xlim(-1, in_channels)
+                        ax.set_xticks(np.arange(0, in_channels, 10))
+                        plt.xticks(rotation=45, ha='right', fontsize=9)
+                    else:
+                        ax.set_xlim(-0.5, in_channels - 0.5)
+                        ax.set_xticks(np.arange(0, in_channels))
+                        plt.xticks(fontsize=10)
+                        
+                    # Highlight the top 2 most important bands with a different color (e.g., Red)
+                    top_2_indices = df_class_sorted['band'].head(2).values
+                    for b_idx in top_2_indices:
+                        if 0 <= b_idx < len(bars):
+                            bars[b_idx].set_color('firebrick')
+                            bars[b_idx].set_edgecolor('black')
                     
                     plt.tight_layout()
-                    plt.savefig(os.path.join(out_dir, f"importance_class_{cls}.png"), dpi=200)
+                    plt.savefig(os.path.join(out_dir, f"importance_class_{cls}_histogram.png"), dpi=300)
                     plt.close(fig)
 
-                # Save Summary CSV containing all classes side-by-side
                 csv_path = os.path.join(out_dir, "feature_importance_summary.csv")
                 df_importance.to_csv(csv_path, index=False)
                 
-                # PURGE THE MODEL
                 del model, y_pred
                 gc.collect()
             
-            # PURGE SCALED DATA
             del X_test_scaled, scaler
             gc.collect()
 
-        # PURGE THE SPLIT'S MASTER RAW POOL
         del X_hyper_raw, X_multi_raw, y_test
         gc.collect()
 

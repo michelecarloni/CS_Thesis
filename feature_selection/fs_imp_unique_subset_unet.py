@@ -25,8 +25,8 @@ taxonomy = 3
 num_splits = 3
 
 dataset_base = "../ds"
-unet_checkpoints_base = "/media/michele/T7/checkpoints/checkpoints_9_unet_pSize64_uniqueSub_NoGlobalSetTiles_ScalerYes_random_aug"
-scalers_path = "/media/michele/T7/scalers/scalers_unique_subset" 
+unet_checkpoints_base = "/run/media/michele/T7/checkpoints/checkpoints_9_unet_pSize64_uniqueSub_NoGlobalSetTiles_ScalerYes_random_aug"
+scalers_path = "/run/media/michele/T7/scalers/scalers_unique_subset" 
 out_base_dir = "../feature_importance_unique_subset_unet_results"
 
 modalities = ["hyperspectral", "multispectral"]
@@ -170,7 +170,8 @@ if __name__ == "__main__":
                                 lost_pixels_per_band[c_raw][b] += newly_wrong_for_c.sum().item()
 
                 # 5. Calculate Final Importance & Generate Outputs
-                df_importance = pd.DataFrame({'Band': np.arange(1, in_channels + 1)})
+                # Shifted to 0-based indexing (0 to in_channels - 1) to match the Standard ML script
+                df_importance = pd.DataFrame({'Band': np.arange(0, in_channels)})
                 
                 for cls in unique_classes:
                     total_correct = baseline_correct_counts[cls]
@@ -185,25 +186,47 @@ if __name__ == "__main__":
                     
                     # Sort and save class-specific CSV
                     df_class_sorted = pd.DataFrame({
-                        'band': np.arange(1, in_channels + 1),
+                        'band': np.arange(0, in_channels),
                         'drop': importances
                     }).sort_values(by='drop', ascending=False)
                     
                     csv_class_path = os.path.join(out_dir, f"importance_class_{cls}_sorted.csv")
                     df_class_sorted.to_csv(csv_class_path, index=False)
                     
-                    # Generate Plot
-                    fig, ax = plt.subplots(figsize=(10, 5))
-                    ax.plot(df_importance['Band'], importances, color='darkred', linewidth=1.5)
-                    ax.fill_between(df_importance['Band'], importances, alpha=0.3, color='salmon')
+                    # Generate Histogram Plot
+                    fig, ax = plt.subplots(figsize=(12, 6))
                     
-                    ax.set_title(f"Band Importance (Zero-Ablation) for {class_names[cls]}\n(U-Net {encoder.title()} | {mod.title()} | Split {split_id})", fontsize=12, pad=10)
-                    ax.set_xlabel("Band Index", fontsize=10)
-                    ax.set_ylabel("Drop in Accuracy (Importance)", fontsize=10)
-                    ax.grid(True, linestyle='--', alpha=0.6)
+                    # Clip to 0 to prevent visual bugs from infinitesimal negative floating point drops
+                    positive_importances = np.clip(importances, a_min=0, a_max=None)
+                    
+                    bars = ax.bar(df_importance['Band'], positive_importances, color='steelblue', edgecolor='black', linewidth=0.5)
+                    ax.axhline(y=0, color='black', linewidth=1)
+                    
+                    ax.set_title(f"Band Importance Histogram (Zero-Ablation): {class_names[cls]}\n(U-Net {encoder.title()} | {mod.title()} | Split {split_id})", fontsize=14, pad=15, fontweight='bold')
+                    ax.set_xlabel("Band Index", fontsize=12)
+                    ax.set_ylabel("Drop in Accuracy", fontsize=12)
+                    
+                    ax.set_axisbelow(True)
+                    ax.grid(axis='y', linestyle='--', alpha=0.7)
+                    
+                    if mod == "hyperspectral":
+                        ax.set_xlim(-1, in_channels)
+                        ax.set_xticks(np.arange(0, in_channels, 10))
+                        plt.xticks(rotation=45, ha='right', fontsize=9)
+                    else:
+                        ax.set_xlim(-0.5, in_channels - 0.5)
+                        ax.set_xticks(np.arange(0, in_channels))
+                        plt.xticks(fontsize=10)
+                        
+                    # Highlight Top 2 bands
+                    top_2_indices = df_class_sorted['band'].head(2).values
+                    for b_idx in top_2_indices:
+                        if 0 <= b_idx < len(bars):
+                            bars[b_idx].set_color('firebrick')
+                            bars[b_idx].set_edgecolor('black')
                     
                     plt.tight_layout()
-                    plt.savefig(os.path.join(out_dir, f"importance_class_{cls}.png"), dpi=200)
+                    plt.savefig(os.path.join(out_dir, f"importance_class_{cls}_histogram.png"), dpi=300)
                     plt.close(fig)
 
                 # Save Summary CSV containing all classes side-by-side
