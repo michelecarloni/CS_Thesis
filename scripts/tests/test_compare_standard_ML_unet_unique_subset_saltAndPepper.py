@@ -4,6 +4,7 @@ import glob
 import random
 import joblib
 import numpy as np
+import pandas as pd
 import torch
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
@@ -74,10 +75,33 @@ def find_unet_model(base_dir, split_id, modality, use_best_model=True):
     return None
 
 
-def plot_inference_comparison_combined(split_id, num_samples, pSize, taxonomy=3, unet_encoders=["resnet18"], use_best_model=True, noise_ratio=0.05):
+def update_certainty_stats(stats_dict, model_name, mod, cls, pred_clean, conf_clean, pred_noisy, conf_noisy, y_true):
+    """Accumulates confidence tracking for corrupted pixels on a per-class basis."""
+    if model_name not in stats_dict:
+        stats_dict[model_name] = {}
+    if mod not in stats_dict[model_name]:
+        stats_dict[model_name][mod] = {}
+    if cls not in stats_dict[model_name][mod]:
+        stats_dict[model_name][mod][cls] = {
+            'clean_correct': [], 'clean_incorrect': [],
+            'noisy_correct': [], 'noisy_incorrect': []
+        }
+        
+    mask_clean_corr = (pred_clean == y_true)
+    mask_clean_inc = ~mask_clean_corr
+    mask_noisy_corr = (pred_noisy == y_true)
+    mask_noisy_inc = ~mask_noisy_corr
+    
+    stats_dict[model_name][mod][cls]['clean_correct'].extend(conf_clean[mask_clean_corr].tolist())
+    stats_dict[model_name][mod][cls]['clean_incorrect'].extend(conf_clean[mask_clean_inc].tolist())
+    stats_dict[model_name][mod][cls]['noisy_correct'].extend(conf_noisy[mask_noisy_corr].tolist())
+    stats_dict[model_name][mod][cls]['noisy_incorrect'].extend(conf_noisy[mask_noisy_inc].tolist())
+
+
+def plot_inference_comparison_combined(split_id, num_samples, pSize, taxonomy=3, unet_encoders=["resnet18"], use_best_model=True, noise_ratio=0.05, global_stats=None):
     print(f"\n{'='*70}")
     model_type_str = "BEST MODEL" if use_best_model else "FINAL EPOCH"
-    print(f"GENERATING COMBINED (CLEAN & NOISY) PLOTS | Unique Subset - Split {split_id} | Ratio {noise_ratio:.2f} | {model_type_str}")
+    print(f"GENERATING COMBINED (CLEAN & NOISY) PLOTS | Split {split_id} | Ratio {noise_ratio:.2f} | {model_type_str}")
     print(f"{'='*70}")
 
     modalities = ["hyperspectral", "multispectral"]
@@ -90,7 +114,7 @@ def plot_inference_comparison_combined(split_id, num_samples, pSize, taxonomy=3,
     unique_classes = [0] + sorted(subset_classes)
     
     taxonomy_key = f'Taxonomy_{taxonomy}'
-    class_names = [h2crop_taxonomy_dict.get(taxonomy_key, {}).get(c, f"Class {c}") if c != 0 else "Background" for c in unique_classes]
+    class_names = {c: h2crop_taxonomy_dict.get(taxonomy_key, {}).get(c, f"Class {c}") if c != 0 else "Background" for c in unique_classes}
     
     base_cmap = plt.cm.tab20.colors
     cmap_colors = ['black'] + [base_cmap[i % len(base_cmap)] for i in range(len(subset_classes))]
@@ -99,7 +123,8 @@ def plot_inference_comparison_combined(split_id, num_samples, pSize, taxonomy=3,
     noisy_cmap_colors = cmap_colors + ['white', 'dimgray']
     noisy_custom_cmap = ListedColormap(noisy_cmap_colors)
     
-    legend_patches = [mpatches.Patch(color=cmap_colors[i], label=class_names[i]) for i in range(len(unique_classes))]
+    # FIXED: Using unique_classes[i] to correctly map the legend labels
+    legend_patches = [mpatches.Patch(color=cmap_colors[i], label=class_names[unique_classes[i]]) for i in range(len(unique_classes))]
 
     inverse_mapping = {idx: raw_label for idx, raw_label in enumerate(unique_classes)}
     raw_to_plot_idx = {raw: idx for idx, raw in enumerate(unique_classes)}
@@ -151,14 +176,7 @@ def plot_inference_comparison_combined(split_id, num_samples, pSize, taxonomy=3,
             checkpoint_path = find_unet_model(unet_checkpoints_base, split_id, mod, use_best_model)
             if checkpoint_path and os.path.exists(checkpoint_path):
                 state_dict = torch.load(checkpoint_path, map_location=device, weights_only=True)
-                block_indices = []
-                for key in state_dict.keys():
-                    if "model.decoder.blocks." in key:
-                        try:
-                            idx = int(key.split("model.decoder.blocks.")[1].split(".")[0])
-                            block_indices.append(idx)
-                        except ValueError:
-                            pass
+                block_indices = [int(k.split("model.decoder.blocks.")[1].split(".")[0]) for k in state_dict.keys() if "model.decoder.blocks." in k]
                 inferred_depth = max(block_indices) + 1 if block_indices else 3
                 model = UNet(in_channels=in_channels, num_classes=num_classes, encoder_name=encoder, encoder_depth=inferred_depth).to(device)
                 model.load_state_dict(state_dict)
@@ -175,9 +193,6 @@ def plot_inference_comparison_combined(split_id, num_samples, pSize, taxonomy=3,
     num_plots_row = 1 + len(ml_models) + len(unet_encoders)
     
     for idx, (hyper_file, multi_file) in enumerate(zip(hyper_paths, multi_paths)):
-        print(f"\n    Generating combined plot {idx+1}/{len(hyper_paths)}...")
-        
-        # Slightly increased vertical spacing and figsize to accommodate the two-line x-labels
         fig, axes = plt.subplots(nrows, num_plots_row, figsize=(24, 4.8 * nrows), gridspec_kw={'hspace': 0.45, 'wspace': 0.05})
         
         with np.load(hyper_file) as data:
@@ -192,6 +207,9 @@ def plot_inference_comparison_combined(split_id, num_samples, pSize, taxonomy=3,
         X_hyper_noisy, h_salt, h_pepper = add_spatial_salt_and_pepper_noise_raw(X_hyper_clean, noise_ratio)
         X_multi_noisy, m_salt, m_pepper = add_spatial_salt_and_pepper_noise_raw(X_multi_clean, noise_ratio)
         
+        # Cache to store the clean predictions/certainty for comparison when evaluating the noisy row (U-Net Only)
+        cache_clean = {"hyperspectral": {}, "multispectral": {}}
+
         for row_idx, (mod, state) in enumerate(row_configs):
             is_noisy = (state == "Noisy")
             in_channels = 218 if mod == "hyperspectral" else 10
@@ -209,6 +227,11 @@ def plot_inference_comparison_combined(split_id, num_samples, pSize, taxonomy=3,
                 y_true_noisy_vis[salt_coords] = 999
                 y_true_noisy_vis[pepper_coords] = 1000
                 predictions = [y_true_noisy_vis]
+                
+                # Boolean mask of exactly where the noise landed
+                noise_mask = np.zeros_like(y_true, dtype=bool)
+                noise_mask[salt_coords] = True
+                noise_mask[pepper_coords] = True
             else:
                 predictions = [y_true]
             
@@ -218,14 +241,17 @@ def plot_inference_comparison_combined(split_id, num_samples, pSize, taxonomy=3,
             if mod in scalers_cpu:
                 X_flat = scalers_cpu[mod].transform(X_flat)
                 
+            # --- A) Standard ML Inference (No Certainty Tracking) ---
             for ml_algo in ml_models:
                 if ml_algo in ml_networks[mod]:
-                    y_pred_flat = ml_networks[mod][ml_algo].predict(X_flat)
-                    predictions.append(y_pred_flat.reshape(H, W))
-                    del y_pred_flat
+                    model = ml_networks[mod][ml_algo]
+                    pred_flat = model.predict(X_flat)
+                    pred_grid = pred_flat.reshape(H, W)
+                    predictions.append(pred_grid)
                 else:
                     predictions.append(np.zeros((H, W)))
                     
+            # --- B) U-Net Inference (With Certainty Tracking) ---
             with torch.no_grad():
                 X_tensor = torch.tensor(X_raw, dtype=torch.float32).unsqueeze(0).to(device)
                 X_tensor = torch.nan_to_num(X_tensor, nan=0.0, posinf=0.0, neginf=0.0)
@@ -234,15 +260,37 @@ def plot_inference_comparison_combined(split_id, num_samples, pSize, taxonomy=3,
                     X_tensor = (X_tensor - scalers_gpu["mean"][mod]) / scalers_gpu["scale"][mod]
                 
                 for encoder in unet_encoders:
+                    model_key = f"unet_{encoder}"
                     if encoder in unet_networks[mod]:
-                        output = unet_networks[mod][encoder](X_tensor)
-                        pred_mapped = torch.max(output, 1)[1].squeeze(0).cpu().numpy()
+                        out = unet_networks[mod][encoder](X_tensor)
+                        
+                        # Extract prediction and certainty (softmax probability)
+                        probs = torch.softmax(out, dim=1)
+                        conf_mapped, pred_idx = torch.max(probs, dim=1)
+                        
+                        pred_mapped = pred_idx.squeeze(0).cpu().numpy()
                         pred_raw = np.vectorize(inverse_mapping.get)(pred_mapped)
+                        conf_raw = conf_mapped.squeeze(0).cpu().numpy()
                         predictions.append(pred_raw)
-                        del output, pred_mapped, pred_raw
+                        
+                        if not is_noisy:
+                            cache_clean[mod][model_key] = {'pred': pred_raw, 'conf': conf_raw}
+                        elif global_stats is not None:
+                            y_noise_true = y_true[noise_mask]
+                            for c_id in np.unique(y_noise_true):
+                                c_mask = (y_noise_true == c_id)
+                                update_certainty_stats(
+                                    stats_dict=global_stats, model_name=model_key, mod=mod, cls=class_names[c_id],
+                                    pred_clean=cache_clean[mod][model_key]['pred'][noise_mask][c_mask],
+                                    conf_clean=cache_clean[mod][model_key]['conf'][noise_mask][c_mask],
+                                    pred_noisy=pred_raw[noise_mask][c_mask],
+                                    conf_noisy=conf_raw[noise_mask][c_mask],
+                                    y_true=y_noise_true[c_mask]
+                                )
                     else:
                         predictions.append(np.zeros((H, W)))
 
+            # --- C) Plotting Logic ---
             for col_idx, (pred_raw_grid, title) in enumerate(zip(predictions, titles)):
                 ax = axes[row_idx, col_idx]
                 
@@ -259,13 +307,8 @@ def plot_inference_comparison_combined(split_id, num_samples, pSize, taxonomy=3,
                 ax.set_xticks([])
                 ax.set_yticks([])
                 
-                if row_idx == 0:
-                    ax.set_title(title, fontsize=16, pad=12)
-                    
-                if col_idx == 0:
-                    y_label = f"{mod.title()}\n({state})\nSample {idx + 1}"
-                    ax.set_ylabel(y_label, fontsize=14, labelpad=15, rotation=90)
-                
+                if row_idx == 0: ax.set_title(title, fontsize=16, pad=12)
+                if col_idx == 0: ax.set_ylabel(f"{mod.title()}\n({state})\nSample {idx + 1}", fontsize=14, labelpad=15, rotation=90)
                 elif col_idx > 0: 
                     correct_px = np.sum(pred_raw_grid == y_true)
                     acc = correct_px / total_px if total_px > 0 else 0.0
@@ -274,12 +317,9 @@ def plot_inference_comparison_combined(split_id, num_samples, pSize, taxonomy=3,
                     present_classes = present_classes[present_classes != 0] 
                     
                     if len(present_classes) > 0:
-                        iou_list = []
-                        for c in present_classes:
-                            intersection = np.sum((pred_raw_grid == c) & (y_true == c))
-                            union = np.sum((pred_raw_grid == c) | (y_true == c))
-                            iou_list.append(intersection / union if union > 0 else 0.0)
-                        mIoU = np.mean(iou_list)
+                        iou_list = [np.sum((pred_raw_grid == c) & (y_true == c)) / np.sum((pred_raw_grid == c) | (y_true == c)) 
+                                    for c in present_classes if np.sum((pred_raw_grid == c) | (y_true == c)) > 0]
+                        mIoU = np.mean(iou_list) if iou_list else 0.0
                         miou_text = f"mIoU: {mIoU:.2f}"
                     else:
                         miou_text = "mIoU: N/A"
@@ -287,18 +327,8 @@ def plot_inference_comparison_combined(split_id, num_samples, pSize, taxonomy=3,
                     metrics_text = f"{miou_text} | OA: {acc:.2f}"
                     
                     if is_noisy:
-                        noisy_mask = np.zeros_like(y_true, dtype=bool)
-                        noisy_mask[salt_coords] = True
-                        noisy_mask[pepper_coords] = True
-                        
-                        tot_noisy = np.sum(noisy_mask)
-                        if tot_noisy > 0:
-                            correct_noisy = np.sum((pred_raw_grid == y_true) & noisy_mask)
-                            noise_acc = correct_noisy / tot_noisy
-                        else:
-                            noise_acc = 0.0
-                            
-                        # Add newline character to push N-Acc below the other metrics
+                        tot_noisy = np.sum(noise_mask)
+                        noise_acc = np.sum((pred_raw_grid == y_true) & noise_mask) / tot_noisy if tot_noisy > 0 else 0.0
                         metrics_text += f"\nS&P-Acc: {noise_acc:.2f}"
                         
                     ax.set_xlabel(metrics_text, fontsize=12, fontweight='bold', color='black', labelpad=8)
@@ -312,24 +342,19 @@ def plot_inference_comparison_combined(split_id, num_samples, pSize, taxonomy=3,
         random_id = uuid.uuid4().hex[:8]
         type_str = "best" if use_best_model else "epoch"
         out_file = os.path.join(img_out_dir, f"inference_combined_split_{split_id}_{type_str}_sample_{idx+1}_{random_id}.png")
-        
         plt.savefig(out_file, dpi=300, bbox_inches='tight', facecolor='white')
         
-        fig.clf()
         plt.close(fig)
-        plt.close('all')
-        del fig, axes
-        
         gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            
-    print(f"\nAll plots saved successfully to {img_out_dir}!")
+        if torch.cuda.is_available(): torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":
     split_list = [1, 2, 3]
     num_iter = 20
+    
+    # Global dictionary to track probabilities before and after noise injection (U-Net only)
+    global_certainty_stats = {}
  
     for split in split_list:
         for i in range(0, num_iter):
@@ -339,5 +364,49 @@ if __name__ == "__main__":
                 pSize=patch_size, 
                 taxonomy=3,
                 use_best_model=True,
-                noise_ratio=0.05
+                noise_ratio=0.05,
+                global_stats=global_certainty_stats
             )
+            
+    # =========================================================
+    # Generate Final Summary Report for all classes across splits
+    # =========================================================
+    print("\n--- Generating Global Certainty Summary ---")
+    summary_records = []
+    
+    for model_name, modalities in global_certainty_stats.items():
+        for mod, classes_dict in modalities.items():
+            for cls_name, stats in classes_dict.items():
+                
+                # Helper function to safely calculate mean without throwing warnings for empty arrays
+                def safe_nanmean(data_list):
+                    arr = np.array(data_list, dtype=float)
+                    if arr.size == 0 or np.all(np.isnan(arr)):
+                        return np.nan
+                    return np.nanmean(arr)
+                
+                clean_corr_avg = safe_nanmean(stats['clean_correct'])
+                clean_inc_avg = safe_nanmean(stats['clean_incorrect'])
+                noisy_corr_avg = safe_nanmean(stats['noisy_correct'])
+                noisy_inc_avg = safe_nanmean(stats['noisy_incorrect'])
+                
+                summary_records.append({
+                    "Model": model_name.upper(),
+                    "Modality": mod.title(),
+                    "Class": cls_name,
+                    "Total Noise Pixels Tested": len(stats['clean_correct']) + len(stats['clean_incorrect']),
+                    "Certainty (Clean & Correct)": f"{clean_corr_avg:.2%}" if not np.isnan(clean_corr_avg) else "N/A",
+                    "Certainty (Clean & Incorrect)": f"{clean_inc_avg:.2%}" if not np.isnan(clean_inc_avg) else "N/A",
+                    "Certainty (Noisy & Correct)": f"{noisy_corr_avg:.2%}" if not np.isnan(noisy_corr_avg) else "N/A",
+                    "Certainty (Noisy & Incorrect)": f"{noisy_inc_avg:.2%}" if not np.isnan(noisy_inc_avg) else "N/A"
+                })
+
+    df_summary = pd.DataFrame(summary_records)
+    
+    # Sort for readability
+    df_summary = df_summary.sort_values(by=["Model", "Modality", "Class"])
+    
+    csv_path = os.path.join(img_out_dir, "certainty_analysis_summary.csv")
+    df_summary.to_csv(csv_path, index=False)
+    
+    print(f"Global Certainty Summary successfully saved to: {csv_path}")
