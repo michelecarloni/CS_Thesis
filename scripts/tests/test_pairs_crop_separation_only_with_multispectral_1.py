@@ -21,7 +21,7 @@ taxonomy = 3
 ml_results_base = "/run/media/michele/T7/feature_importance_results/feature_importance_unique_subset_standard_ML_results_bar_chart/hyperspectral"
 unet_results_base = "/run/media/michele/T7/feature_importance_results/feature_importance_unique_subset_unet_results_bar_chart/hyperspectral"
 
-out_dir = "../../final_analysis_results/separation_multispectral_pairs"
+out_dir = "../../final_analysis_results/separation_multispectral_pairs_1"
 os.makedirs(out_dir, exist_ok=True)
 
 models = {
