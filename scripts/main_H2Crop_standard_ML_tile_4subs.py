@@ -22,19 +22,23 @@ if __name__ == "__main__":
     taxonomy = 3
     patch_sizes = [64]
     save_results_dir = "../results_8"
+    
+    # Path to the base directory containing the "4_subs" pre-computed .joblib scalers
+    scalers_dir = "/run/media/michele/T7/scalers"
+    
     use_gpu = True
 
     valid_threshold = 0.05
     
     use_optuna = False            
     n_trials = 8                # Number of Optuna trials to run per algorithm
-    debug = False                # Toggle to True for a rapid plumbing test (processes only 10 files)
+    debug = False               # Toggle to True for a rapid plumbing test (processes only 10 files)
 
-    train_samples_per_class=100000
-    val_samples_per_class=25000
-    test_samples_per_class=100
+    train_samples_per_class = 100000
+    val_samples_per_class = 25000
+    test_samples_per_class = 100
     
-    # New Tuple Structure: (all_classes, minority_classes)
+    # Tuple Structure: (all_classes, minority_classes)
     subsets = {
         1: ([8, 11, 23, 56], [56]),
         2: ([13, 30, 38, 53, 61], [13, 53, 61]),
@@ -42,7 +46,6 @@ if __name__ == "__main__":
         4: ([29, 50, 64, 76], [64, 76])
     }
     
-
     """
     subsets = {
         1: ([8, 11, 23], []),
@@ -97,8 +100,9 @@ if __name__ == "__main__":
                         pipeline_H2Crop_standard_ML_algo_tiles(
                             save_results_dir=save_results_dir,
                             dataset_dir=dataset_dir,
+                            scalers_dir=scalers_dir,
                             subset_id=subset_id,
-                            subset_classes=subset_classes, # EXPLICITLY PASS THE TARGET CLASSES
+                            subset_classes=subset_classes,
                             modality=mod,
                             taxonomy=taxonomy,
                             patch_size=patch_size,
