@@ -2,6 +2,7 @@ import os
 import sys
 import gc
 import csv
+import joblib
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import ConfusionMatrixDisplay
@@ -21,7 +22,8 @@ def pipeline_H2Crop_unet(
     encoder_name,
     model_name,
     save_results_dir, 
-    dataset_dir, 
+    dataset_dir,
+    scalers_dir,
     subset_id, 
     subset_classes,
     minority_classes, 
@@ -39,6 +41,7 @@ def pipeline_H2Crop_unet(
 ):
     """
     Pipeline for training U-Net over the previously extracted 4 subsets
+    using pre-computed global StandardScalers.
     """
     # INPUT VALIDATION
     valid_modes = ["no_aug", "random_aug", "full_aug", "minority_class_aug"]
@@ -56,9 +59,29 @@ def pipeline_H2Crop_unet(
     
     checkpoint_dir = os.path.join("..", "checkpoints", model_name, modality, f"subset_{subset_id}_pSize_{patch_size}")
     os.makedirs(checkpoint_dir, exist_ok=True)
+
+    device = torch.device("cuda" if use_gpu and torch.cuda.is_available() else "cpu")
+    print(f"Compute Device: {device}")
+
+    # ==========================================
+    # PHASE 1: LOAD PRE-COMPUTED SCALER
+    # ==========================================
+    scaler_path = os.path.join(scalers_dir, "4_subs", modality, f"scaler_subset_{subset_id}_tax_{taxonomy}_pSize_{patch_size}.joblib")
     
+    if not os.path.exists(scaler_path):
+        raise FileNotFoundError(f"Scaler missing at: {scaler_path}. Please run scaling_4_subs.py first.")
+        
+    print(f"\n--- Loading Global StandardScaler from Disk ({scaler_path}) ---")
+    scaler = joblib.load(scaler_path)
+    
+    # Convert Scikit-Learn arrays to GPU tensors and reshape for native PyTorch broadcasting (1, C, 1, 1)
+    scaler_mean = torch.tensor(scaler.mean_, dtype=torch.float32, device=device).view(1, in_channels, 1, 1)
+    scaler_scale = torch.tensor(scaler.scale_, dtype=torch.float32, device=device).view(1, in_channels, 1, 1)
+    
+    # ==========================================
+    # PHASE 2: DATA LOADING & TRAINING
+    # ==========================================
     print("\n--- Initializing PyTorch DataLoaders ---")
-    # Pass the train_aug_mode and minority_classes directly to the dataset instances
     train_dataset = H2CropTileDataset(
         os.path.join(dataset_dir, "train"), 
         subset_classes=subset_classes, 
@@ -70,13 +93,15 @@ def pipeline_H2Crop_unet(
         os.path.join(dataset_dir, "validation"), 
         subset_classes=subset_classes, 
         minority_classes=minority_classes,
-        debug=debug
+        debug=debug,
+        train_aug_mode="no_aug"
     )
     test_dataset = H2CropTileDataset(
         os.path.join(dataset_dir, "test"), 
         subset_classes=subset_classes, 
         minority_classes=minority_classes,
-        debug=debug
+        debug=debug,
+        train_aug_mode="no_aug"
     )
     
     num_workers = 0 if debug else min(4, os.cpu_count() or 1)
@@ -89,9 +114,6 @@ def pipeline_H2Crop_unet(
     
     taxonomy_key = f'Taxonomy_{taxonomy}'
     target_names = [h2crop_taxonomy_dict.get(taxonomy_key, {}).get(c, f"Class {c}") if c != 0 else "Background (0)" for c in sample_y]
-
-    device = torch.device("cuda" if use_gpu and torch.cuda.is_available() else "cpu")
-    print(f"Compute Device: {device}")
 
     # FINAL PRODUCTION TRAINING
     print(f"\n--- INITIATING FINAL TRAINING: {model_name} (Depth: {encoder_depth}) ---")
@@ -149,12 +171,12 @@ def pipeline_H2Crop_unet(
             batch_X = batch_X.to(device, non_blocking=True)
             batch_y = batch_y.long().to(device, non_blocking=True)
             
-            # Sanitize any isolated NaN/Inf values without dropping the batch
+            # NATIVE GPU SCALING USING PRE-COMPUTED TENSORS
             batch_X = torch.nan_to_num(batch_X, nan=0.0, posinf=0.0, neginf=0.0)
+            batch_X = (batch_X - scaler_mean) / scaler_scale
             
             optimizer.zero_grad()
             
-            # Forward Pass (Global per-band normalization happens inside UNet.input_norm)
             outputs = model(batch_X)
             loss = criterion(outputs, batch_y)
             
@@ -189,7 +211,9 @@ def pipeline_H2Crop_unet(
                 batch_X = batch_X.to(device, non_blocking=True)
                 batch_y = batch_y.long().to(device, non_blocking=True)
                 
+                # NATIVE GPU SCALING
                 batch_X = torch.nan_to_num(batch_X, nan=0.0, posinf=0.0, neginf=0.0)
+                batch_X = (batch_X - scaler_mean) / scaler_scale
                 
                 # Forward Pass
                 outputs = model(batch_X)
@@ -317,7 +341,9 @@ def pipeline_H2Crop_unet(
             batch_X = batch_X.to(device, non_blocking=True)
             batch_y = batch_y.long().to(device, non_blocking=True)
             
+            # NATIVE GPU SCALING
             batch_X = torch.nan_to_num(batch_X, nan=0.0, posinf=0.0, neginf=0.0)
+            batch_X = (batch_X - scaler_mean) / scaler_scale
             
             outputs = model(batch_X)
                 

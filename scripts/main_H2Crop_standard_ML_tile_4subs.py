@@ -28,7 +28,7 @@ if __name__ == "__main__":
     
     use_gpu = True
 
-    valid_threshold = 0.05
+    valid_threshold = 0.1
     
     use_optuna = False            
     n_trials = 8                # Number of Optuna trials to run per algorithm
