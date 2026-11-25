@@ -37,6 +37,9 @@ def pipeline_H2Crop_unet(
     debug=False,
     train_aug_mode="minority_class_aug"
 ):
+    """
+    Pipeline for training U-Net over the previously extracted 4 subsets
+    """
     # INPUT VALIDATION
     valid_modes = ["no_aug", "random_aug", "full_aug", "minority_class_aug"]
     if train_aug_mode not in valid_modes:

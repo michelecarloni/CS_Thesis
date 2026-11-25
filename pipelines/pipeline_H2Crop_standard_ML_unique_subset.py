@@ -137,6 +137,9 @@ def pipeline_H2Crop_standard_ML_algo_unique(
     train_samples_per_class=100000,
     debug=False
 ):
+    """
+    Pipeline for training Standard ML over the previously extracted unique subset
+    """
     mode = "DEBUG MODE" if debug else "PRODUCTION MODE (CPU OUT-OF-CORE BATCHING)"
     print(f"\nSTARTING ML SEGMENTATION PIPELINE FOR: {modality.upper()} | Split {split_id} | {mode}")
 

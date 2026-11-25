@@ -37,6 +37,9 @@ def pipeline_H2Crop_unet_unique(
     debug=False,
     train_aug_mode="minority_class_aug"
 ):
+    """
+    Pipeline for training U-Net over the previously extracted unique subset
+    """
     valid_modes = ["no_aug", "random_aug", "full_aug", "minority_class_aug"]
     if train_aug_mode not in valid_modes:
         raise ValueError(f"Invalid train_aug_mode '{train_aug_mode}'. Must be exactly one of: {valid_modes}")
