@@ -7,10 +7,12 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 from H2Crop.H2Crop import H2Crop
+
 from scripts.extract_tiles_4_subs import extract_4_subs_tiles
 
-# Import pipeline
-from pipelines.pipeline_H2Crop_unet import pipeline_H2Crop_unet
+# Import both the standard baseline and the Optuna-optimized pipeline
+from pipelines.pipeline_H2Crop_standard_ML_algo_tiles import pipeline_H2Crop_standard_ML_algo_tiles
+from pipelines.pipeline_H2Crop_standard_ML_algo_tiles_optuna import pipeline_H2Crop_standard_ML_algo_tiles_optuna
 
 if __name__ == "__main__":
     # ==========================================
@@ -19,31 +21,31 @@ if __name__ == "__main__":
     modalities = ["hyperspectral", "multispectral"]
     taxonomy = 3
     patch_sizes = [64]
-    valid_threshold = 0.10  # Increased to ensure good crop density per tile
     save_results_dir = "../results_8"
     
-    # Exclusively use ResNet-18 encoder
-    encoders = ["resnet18"]
+    # Path to the base directory containing the "4_subs" pre-computed .joblib scalers
+    scalers_dir = "/run/media/michele/T7/scalers"
     
     use_gpu = True
-    use_optuna = False
+
+    valid_threshold = 0.05
     
-    n_trials = 10
-    epochs_per_trial = 15
-    final_epochs = 100       # Increased to 40 for CosineAnnealingLR convergence
-    batch_size = 32         # Optimized batch size for 64x64 tiles
-    encoder_depth = 4       # Matched with 64x64 tiles and ResNet-18
-    debug = False
-    train_aug_mode = "minority_class_aug"
+    use_optuna = False            
+    n_trials = 8                # Number of Optuna trials to run per algorithm
+    debug = False               # Toggle to True for a rapid plumbing test (processes only 10 files)
+
+    train_samples_per_class = 100000
+    val_samples_per_class = 25000
+    test_samples_per_class = 100
     
-    # DICTIONARY: (all_classes, minority_classes)
+    # Tuple Structure: (all_classes, minority_classes)
     subsets = {
         1: ([8, 11, 23, 56], [56]),
         2: ([13, 30, 38, 53, 61], [13, 53, 61]),
         3: ([1, 2, 10, 17], [1, 10, 17]),
         4: ([29, 50, 64, 76], [64, 76])
     }
-
+    
     """
     subsets = {
         1: ([8, 11, 23], []),
@@ -53,6 +55,7 @@ if __name__ == "__main__":
     }
     """
     
+    # Initialize the dataset loader
     print("Initializing H2Crop Loader...")
     loader = H2Crop()
 
@@ -61,51 +64,50 @@ if __name__ == "__main__":
     # ==========================================
     extract_4_subs_tiles(patch_sizes, subsets, modalities, loader, taxonomy, valid_threshold)
 
-    # ==========================================
-    # 2. TRAINING PHASE (Deep Learning U-Net)
-    # ==========================================
-    print("\n--- Starting Deep Learning Phase (U-Net) ---")
     
-    for encoder in encoders:
-        for patch_size in patch_sizes:
+    # ==========================================
+    # 2. TRAINING PHASE (ML Baselines)
+    # ==========================================
+    print("\n--- Starting Training Phase (Standard ML Segmentations) ---")
+    
+    for patch_size in patch_sizes:
+        # unpack the tuple
+        for subset_id, (subset_classes, minority_classes) in subsets.items():
+            save_base_dir = f"../ds/H2Crop_tiles_ds_subset_{subset_id}"
             
-            current_results_dir = os.path.join(save_results_dir, f"unet_enc_{encoder}_{patch_size}")
-            
-            # UNPACK THE TUPLE HERE
-            for subset_id, (subset_classes, minority_classes) in subsets.items():
-                save_base_dir = f"../ds/H2Crop_tiles_ds_subset_{subset_id}"
+            for mod in modalities:
+                dataset_dir = os.path.join(save_base_dir, f"{mod}_taxonomy_{taxonomy}_pSize_{patch_size}")
                 
-                for mod in modalities:
-                    dataset_dir = os.path.join(save_base_dir, f"{mod}_taxonomy_{taxonomy}_pSize_{patch_size}")
+                if os.path.exists(dataset_dir):
                     
-                    if os.path.exists(dataset_dir):
-                        in_channels = 218 if mod == "hyperspectral" else 10
-                        num_classes = len(subset_classes) + 1
-                        model_name = f"unet_enc_{encoder}"
-                        
-                        print(f"\nInitializing {model_name} for {mod.upper()} Subset {subset_id}...")
-                        
-                        # Standard Training (No Optuna)
-                        pipeline_H2Crop_unet(
-                            in_channels=in_channels,
-                            encoder_name=encoder,
-                            model_name=model_name,
-                            save_results_dir=current_results_dir,
+                    # Route to the appropriate pipeline based on the toggle
+                    if use_optuna:
+                        pipeline_H2Crop_standard_ML_algo_tiles_optuna(
+                            save_results_dir=save_results_dir,
                             dataset_dir=dataset_dir,
                             subset_id=subset_id,
-                            subset_classes=subset_classes,
-                            minority_classes=minority_classes, # PASS EXPLICITLY TO PIPELINE
                             modality=mod,
                             taxonomy=taxonomy,
                             patch_size=patch_size,
                             use_gpu=use_gpu,
-                            epochs=final_epochs,
-                            batch_size=batch_size,
-                            encoder_depth=encoder_depth,
-                            lr=1e-3,
-                            weight_decay=1e-4,
-                            debug=debug,
-                            train_aug_mode=train_aug_mode
+                            train_samples_per_class=train_samples_per_class,
+                            val_samples_per_class=val_samples_per_class,
+                            test_samples_per_class=test_samples_per_class,
+                            n_trials=n_trials,
+                            debug=debug
                         )
                     else:
-                        print(f"[Error] Dataset directory {dataset_dir} missing. Skipping training for this config.")
+                        pipeline_H2Crop_standard_ML_algo_tiles(
+                            save_results_dir=save_results_dir,
+                            dataset_dir=dataset_dir,
+                            scalers_dir=scalers_dir,
+                            subset_id=subset_id,
+                            subset_classes=subset_classes,
+                            modality=mod,
+                            taxonomy=taxonomy,
+                            patch_size=patch_size,
+                            train_samples_per_class=train_samples_per_class,
+                            debug=debug
+                        )
+                else:
+                    print(f"[Error] Dataset directory {dataset_dir} missing. Skipping training for this config.")
