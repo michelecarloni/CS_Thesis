@@ -285,14 +285,30 @@ def pipeline_H2Crop_standard_ML_algo_tiles(
             f.write(f"Inference Complete\nAlgorithm: {algo_name}\n\n")
             f.write(f"Test Set Classification Report\n{report}")
             
-        matrix_path = os.path.join(algo_dir, f"confusion_matrix_subset_{subset_id}.png")
-        fig, ax = plt.subplots(figsize=(10, 8))
-        ConfusionMatrixDisplay(confusion_matrix=global_cm, display_labels=target_names).plot(ax=ax, cmap='Blues', colorbar=False)
-        plt.title(f"Confusion Matrix: {algo_name}\n({modality} | Subset {subset_id} | pSize {patch_size})")
+        # Plot 1: Absolute Confusion Matrix (Raw Counts)
+        fig_abs, ax_abs = plt.subplots(figsize=(10, 8))
+        ConfusionMatrixDisplay(confusion_matrix=global_cm, display_labels=target_names).plot(
+            ax=ax_abs, cmap='Blues', colorbar=True, values_format='d'
+        )
+        plt.title(f"Absolute CM: {algo_name}\n({modality} | Subset {subset_id} | pSize {patch_size})")
         plt.xticks(rotation=45, ha='right', fontsize=9)
         plt.tight_layout()
-        plt.savefig(matrix_path, dpi=300)
-        plt.close(fig)
+        plt.savefig(os.path.join(algo_dir, f"cm_absolute_subset_{subset_id}.png"), dpi=300)
+        plt.close(fig_abs)
+
+        # Plot 2: Normalized Confusion Matrix (Recall Ratio 0 to 1)
+        row_sums = global_cm.sum(axis=1)[:, np.newaxis]
+        cm_normalized = np.divide(global_cm.astype('float'), row_sums, out=np.zeros_like(global_cm, dtype=float), where=row_sums != 0)
+
+        fig_norm, ax_norm = plt.subplots(figsize=(10, 8))
+        ConfusionMatrixDisplay(confusion_matrix=cm_normalized, display_labels=target_names).plot(
+            ax=ax_norm, cmap='Blues', colorbar=True, values_format='.2f'
+        )
+        plt.title(f"Normalized CM (Recall): {algo_name}\n({modality} | Subset {subset_id} | pSize {patch_size})")
+        plt.xticks(rotation=45, ha='right', fontsize=9)
+        plt.tight_layout()
+        plt.savefig(os.path.join(algo_dir, f"cm_normalized_subset_{subset_id}.png"), dpi=300)
+        plt.close(fig_norm)
 
         checkpoint_dir = os.path.join("..", "checkpoints", algo_name.lower(), modality)
         os.makedirs(checkpoint_dir, exist_ok=True)
@@ -301,7 +317,7 @@ def pipeline_H2Crop_standard_ML_algo_tiles(
         joblib.dump(model, model_filepath)
         print(f"Saved checkpoint to: {model_filepath}")
         
-        del model
+        del model, global_cm
         gc.collect()
 
     print(f"\nPipeline completed successfully for {modality.upper()} Subset {subset_id}!")
