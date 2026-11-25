@@ -8,7 +8,6 @@ import matplotlib.pyplot as plt
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import SGDClassifier
-from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 from sklearn.utils.class_weight import compute_class_weight
 from H2Crop.data_structures import h2crop_taxonomy_dict
@@ -128,7 +127,8 @@ def extract_balanced_pixels_memory_safe(files, target_samples_per_class, subset_
 
 def pipeline_H2Crop_standard_ML_algo_unique(
     save_results_dir, 
-    dataset_dir, 
+    dataset_dir,
+    scalers_dir,
     split_id, 
     subset_classes,
     modality, 
@@ -139,6 +139,7 @@ def pipeline_H2Crop_standard_ML_algo_unique(
 ):
     """
     Pipeline for training Standard ML over the previously extracted unique subset
+    using pre-computed global StandardScalers.
     """
     mode = "DEBUG MODE" if debug else "PRODUCTION MODE (CPU OUT-OF-CORE BATCHING)"
     print(f"\nSTARTING ML SEGMENTATION PIPELINE FOR: {modality.upper()} | Split {split_id} | {mode}")
@@ -158,24 +159,20 @@ def pipeline_H2Crop_standard_ML_algo_unique(
     current_taxonomy = h2crop_taxonomy_dict.get(taxonomy_key, {}) 
     target_names = [current_taxonomy.get(c, f"Class {c}") if c != 0 else "Background (0)" for c in subset_classes_array]
 
-    # Phase 1: Out-of-Core Scaler Fitting
-    print("\nPhase 1: Streaming Global Feature Scaling")
-    scaler = StandardScaler()
+    # Phase 1: Load Pre-Computed Global Scaler
+    scaler_path = os.path.join(scalers_dir, "unique_subset", modality, f"scaler_split_{split_id}_tax_{taxonomy}_pSize_{patch_size}.joblib")
     
-    for chunk in tqdm(list(chunked_file_generator(train_files, chunk_size=500)), desc="Fitting Scaler (Batches)"):
-        X_chunk, _ = load_chunk_into_memory(chunk)
-        scaler.partial_fit(X_chunk)
-        del X_chunk
-        gc.collect()
+    if not os.path.exists(scaler_path):
+        raise FileNotFoundError(f"Scaler missing at: {scaler_path}. Please run the preprocessing scaler script first.")
         
-    scaler_dir = os.path.join("..", "checkpoints", "scalers", "unique_subset", modality)
-    os.makedirs(scaler_dir, exist_ok=True)
-    joblib.dump(scaler, os.path.join(scaler_dir, f"scaler_split_{split_id}_tax_{taxonomy}_pSize_{patch_size}.joblib"))
+    print(f"\nPhase 1: Loading Global StandardScaler from Disk ({scaler_path})")
+    scaler = joblib.load(scaler_path)
 
     # Phase 2: Capped Data Extraction & Global Class Tracking
     X_train_capped, y_train_capped, global_class_weights, capped_counts_dict, total_counts_dict = extract_balanced_pixels_memory_safe(
         train_files, train_samples_per_class, subset_classes_array, "Train", debug=debug
     )
+    X_train_capped = np.nan_to_num(X_train_capped, nan=0.0, posinf=0.0, neginf=0.0)
     X_train_capped = scaler.transform(X_train_capped).astype(np.float32)
 
     # Phase 3: Model Initialization with robust global class weights
@@ -204,6 +201,7 @@ def pipeline_H2Crop_standard_ML_algo_unique(
             print(f"Streaming Training Set for {algo_name}...")
             for chunk in tqdm(list(chunked_file_generator(train_files, chunk_size=500)), desc="Training Batches"):
                 X_chunk, y_chunk = load_chunk_into_memory(chunk)
+                X_chunk = np.nan_to_num(X_chunk, nan=0.0, posinf=0.0, neginf=0.0)
                 X_chunk = scaler.transform(X_chunk).astype(np.float32)
                 model.partial_fit(X_chunk, y_chunk, classes=subset_classes_array)
                 del X_chunk, y_chunk
@@ -217,6 +215,7 @@ def pipeline_H2Crop_standard_ML_algo_unique(
             print(f"Streaming Training Set ({len(chunks)} chunks) for {algo_name}...")
             for chunk in tqdm(chunks, desc="Training Batches"):
                 X_chunk, y_chunk = load_chunk_into_memory(chunk)
+                X_chunk = np.nan_to_num(X_chunk, nan=0.0, posinf=0.0, neginf=0.0)
                 X_chunk = scaler.transform(X_chunk).astype(np.float32)
                 
                 dummy_X = np.tile(X_chunk[0], (len(subset_classes_array), 1))
@@ -238,6 +237,7 @@ def pipeline_H2Crop_standard_ML_algo_unique(
         
         for chunk in tqdm(list(chunked_file_generator(test_files, chunk_size=500)), desc="Evaluating Batches"):
             X_chunk, y_chunk = load_chunk_into_memory(chunk)
+            X_chunk = np.nan_to_num(X_chunk, nan=0.0, posinf=0.0, neginf=0.0)
             X_chunk = scaler.transform(X_chunk).astype(np.float32)
             
             y_pred = model.predict(X_chunk)

@@ -12,16 +12,16 @@ from pipelines.pipeline_H2Crop_standard_ML_unique_subset import pipeline_H2Crop_
 
 if __name__ == "__main__":
     # ==========================================
-    # HYPERPARAMETERS & CONFIGURATION
+    # CONFIGURATION
     # ==========================================
     modalities = ["hyperspectral", "multispectral"]
     taxonomy = 3
     patch_sizes = [64]
     valid_threshold = 0.10  
     
-    # Unified path variables as requested
     save_results_dir = "../results_9"
     save_base_dir = "../ds/H2Crop_tiles_unique_subset"
+    scalers_dir = "/media/michele/T7/scalers/scalers_unique_subset"
 
     # Unified subset configuration: Dictionary with tuple key (common classes) and list value (minority classes)
     unique_classes_dict = {(8, 11, 23, 30, 38, 1, 2): [10, 29, 50]}
@@ -70,6 +70,7 @@ if __name__ == "__main__":
                     pipeline_H2Crop_standard_ML_algo_unique(
                         save_results_dir=save_results_dir,
                         dataset_dir=dataset_dir,
+                        scalers_dir=scalers_dir,
                         split_id=split_id,
                         subset_classes=all_subset_classes, 
                         modality=mod,

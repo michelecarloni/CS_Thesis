@@ -14,7 +14,7 @@ from pipelines.pipeline_H2Crop_unet import pipeline_H2Crop_unet
 
 if __name__ == "__main__":
     # ==========================================
-    # HYPERPARAMETERS & CONFIGURATION
+    # CONFIGURATION
     # ==========================================
     modalities = ["hyperspectral", "multispectral"]
     taxonomy = 3

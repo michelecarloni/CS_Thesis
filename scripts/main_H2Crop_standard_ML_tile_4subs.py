@@ -16,7 +16,7 @@ from pipelines.pipeline_H2Crop_standard_ML_algo_tiles_optuna import pipeline_H2C
 
 if __name__ == "__main__":
     # ==========================================
-    # HYPERPARAMETERS & CONFIGURATION
+    # CONFIGURATION
     # ==========================================
     modalities = ["hyperspectral", "multispectral"]
     taxonomy = 3

@@ -8,21 +8,19 @@ if project_root not in sys.path:
 
 from H2Crop.H2Crop import H2Crop
 from scripts.extract_tiles_unique_sub import extract_unique_sub_tiles
-
-# Import pipeline
 from pipelines.pipeline_H2Crop_unet_unique_subset import pipeline_H2Crop_unet_unique
 
 if __name__ == "__main__":
     # ==========================================
-    # HYPERPARAMETERS & CONFIGURATION
+    # CONFIGURATION
     # ==========================================
     modalities = ["hyperspectral", "multispectral"]
     taxonomy = 3
     patch_sizes = [64]
     valid_threshold = 0.10  
+
     save_results_dir = "../results_9"
-    
-    # NEW: Define the path to the pre-computed .joblib scalers
+    save_base_dir = "../ds/H2Crop_tiles_unique_subset"
     scalers_dir = "/media/michele/T7/scalers/scalers_unique_subset"
     
     encoders = ["resnet18"]
@@ -44,7 +42,7 @@ if __name__ == "__main__":
     final_epochs = 100
     batch_size = 32
     encoder_depth = 4
-    train_aug_mode = "random_aug" 
+    train_aug_mode = "random_aug"  
     
     print("Initializing H2Crop Loader...")
     loader = H2Crop()
@@ -68,7 +66,6 @@ if __name__ == "__main__":
     # ==========================================
     print("\n--- Starting Deep Learning Phase (CV across Splits) ---")
     
-    save_base_dir = "../ds/H2Crop_tiles_unique_subset"
     
     for encoder in encoders:
         for patch_size in patch_sizes:
